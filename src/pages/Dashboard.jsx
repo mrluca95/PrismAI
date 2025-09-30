@@ -1,6 +1,6 @@
-
 import React, { useState, useEffect, useRef, useCallback } from "react";
 import { Asset, AIInsight, User } from "@/entities/all";
+import { useNavigate } from 'react-router-dom';
 import BalanceCard from "../components/dashboard/BalanceCard";
 import AIInsightsCard from "../components/dashboard/AIInsightsCard";
 import QuickStats from "../components/dashboard/QuickStats";
@@ -32,20 +32,21 @@ export default function Dashboard({ setPerformanceSign = () => {} }) {
 
   const insightsContainerRef = useRef(null);
   const isInitialized = useRef(false);
+  const navigate = useNavigate();
 
   useEffect(() => {
     const checkOnboarding = async () => {
-        try {
-            const user = await User.me();
-            if (!user.onboardingCompleted) {
-                window.location.href = createPageUrl("Onboarding");
-            }
-        } catch (e) {
-            // Not logged in, do nothing, assume public or login flow will handle
+      try {
+        const user = await User.me();
+        if (!user.onboardingCompleted) {
+          navigate(createPageUrl("Onboarding"), { replace: true });
         }
+      } catch (e) {
+        // Not logged in, do nothing, assume public or login flow will handle
+      }
     };
     checkOnboarding();
-  }, []);
+  }, [navigate]);
 
   const syncAssetPrices = useCallback(async (currentAssets) => {
     if (!currentAssets || currentAssets.length === 0) {
@@ -471,3 +472,4 @@ export default function Dashboard({ setPerformanceSign = () => {} }) {
     </div>
   );
 }
+
