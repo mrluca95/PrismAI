@@ -1,0 +1,55 @@
+{
+  "name": "Transaction",
+  "type": "object",
+  "properties": {
+    "asset_symbol": {
+      "type": "string",
+      "description": "Symbol of the asset being transacted"
+    },
+    "type": {
+      "type": "string",
+      "enum": [
+        "buy",
+        "sell"
+      ],
+      "description": "Type of transaction"
+    },
+    "quantity": {
+      "type": "number",
+      "description": "Number of shares/units transacted"
+    },
+    "price": {
+      "type": "number",
+      "description": "Price per unit at the time of transaction"
+    },
+    "date": {
+      "type": "string",
+      "format": "date-time",
+      "description": "Date and time of the transaction"
+    },
+    "broker": {
+      "type": "string",
+      "description": "Broker where the transaction occurred"
+    },
+    "total_cost": {
+      "type": "number",
+      "description": "Total cost or proceeds from the transaction"
+    }
+  },
+  "required": [
+    "asset_symbol",
+    "type",
+    "quantity",
+    "price",
+    "date",
+    "broker"
+  ],
+  "rls": {
+    "read": {
+      "created_by": "{{user.email}}"
+    },
+    "write": {
+      "created_by": "{{user.email}}"
+    }
+  }
+}

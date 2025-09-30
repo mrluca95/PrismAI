@@ -1,0 +1,60 @@
+{
+  "name": "AIInsight",
+  "type": "object",
+  "properties": {
+    "title": {
+      "type": "string",
+      "description": "Short title for the insight"
+    },
+    "description": {
+      "type": "string",
+      "description": "Detailed description of the insight"
+    },
+    "type": {
+      "type": "string",
+      "enum": [
+        "risk_alert",
+        "diversification",
+        "opportunity",
+        "market_trend",
+        "rebalancing"
+      ],
+      "description": "Type of AI insight"
+    },
+    "priority": {
+      "type": "string",
+      "enum": [
+        "high",
+        "medium",
+        "low"
+      ],
+      "default": "medium",
+      "description": "Priority level of the insight"
+    },
+    "related_assets": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "description": "Asset symbols this insight relates to"
+    },
+    "action_required": {
+      "type": "boolean",
+      "default": false,
+      "description": "Whether this insight requires user action"
+    }
+  },
+  "required": [
+    "title",
+    "description",
+    "type"
+  ],
+  "rls": {
+    "read": {
+      "created_by": "{{user.email}}"
+    },
+    "write": {
+      "created_by": "{{user.email}}"
+    }
+  }
+}

@@ -1,0 +1,77 @@
+{
+  "name": "Asset",
+  "type": "object",
+  "properties": {
+    "symbol": {
+      "type": "string",
+      "description": "Asset symbol (e.g., AAPL, BTC)"
+    },
+    "name": {
+      "type": "string",
+      "description": "Full name of the asset"
+    },
+    "type": {
+      "type": "string",
+      "enum": [
+        "stock",
+        "etf",
+        "crypto",
+        "bond",
+        "mutual_fund"
+      ],
+      "description": "Type of asset"
+    },
+    "broker": {
+      "type": "string",
+      "description": "Broker where asset is held"
+    },
+    "quantity": {
+      "type": "number",
+      "description": "Number of shares/units owned"
+    },
+    "current_price": {
+      "type": "number",
+      "description": "Current market price per unit"
+    },
+    "purchase_price": {
+      "type": "number",
+      "description": "Average purchase price per unit"
+    },
+    "market_value": {
+      "type": "number",
+      "description": "Current total market value"
+    },
+    "gain_loss": {
+      "type": "number",
+      "description": "Total gain or loss in dollars"
+    },
+    "gain_loss_percent": {
+      "type": "number",
+      "description": "Gain or loss as percentage"
+    },
+    "day_change": {
+      "type": "number",
+      "description": "Change in value today"
+    },
+    "day_change_percent": {
+      "type": "number",
+      "description": "Percentage change today"
+    }
+  },
+  "required": [
+    "symbol",
+    "name",
+    "type",
+    "broker",
+    "quantity",
+    "current_price"
+  ],
+  "rls": {
+    "read": {
+      "created_by": "{{user.email}}"
+    },
+    "write": {
+      "created_by": "{{user.email}}"
+    }
+  }
+}
