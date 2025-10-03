@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
-import { User } from "@/entities/User";
 import { createPageUrl } from "@/utils";
+import { useAuth } from '@/context/AuthContext.jsx';
 import OnboardingLayout from "../components/onboarding/OnboardingLayout";
 import WelcomeStep from "../components/onboarding/WelcomeStep";
 import BasicsStep from "../components/onboarding/BasicsStep";
@@ -13,6 +13,7 @@ const TOTAL_STEPS = 5;
 
 export default function OnboardingPage() {
   const navigate = useNavigate();
+  const { user, updateProfile } = useAuth();
   const [currentStep, setCurrentStep] = useState(1);
   const [data, setData] = useState({
     age: "",
@@ -28,25 +29,17 @@ export default function OnboardingPage() {
   });
 
   useEffect(() => {
-    const checkOnboardingStatus = async () => {
-      try {
-        const user = await User.me();
-        if (user.onboardingCompleted) {
-          navigate(createPageUrl("Dashboard"));
-        }
-      } catch (e) {
-        // Not logged in, stay on page
-      }
-    };
-    checkOnboardingStatus();
-  }, [navigate]);
+    if (user?.onboardingCompleted) {
+      navigate(createPageUrl("Dashboard"), { replace: true });
+    }
+  }, [user, navigate]);
 
   const handleNext = () => setCurrentStep(prev => Math.min(prev + 1, TOTAL_STEPS));
   const handleBack = () => setCurrentStep(prev => Math.max(prev - 1, 1));
   
   const handleSkip = async () => {
     try {
-      await User.updateMyUserData({ onboardingCompleted: true, plan: 'free' });
+      await updateProfile({ onboardingCompleted: true, plan: 'free' });
     } finally {
       navigate(createPageUrl("Dashboard"));
     }
@@ -54,10 +47,10 @@ export default function OnboardingPage() {
 
   const handleFinish = async () => {
     try {
-      await User.updateMyUserData({ 
-        onboardingCompleted: true, 
+      await updateProfile({
+        onboardingCompleted: true,
         profile: data,
-        plan: 'free'
+        plan: 'free',
       });
     } finally {
       navigate(createPageUrl("Dashboard"));

@@ -2,7 +2,7 @@ import React, { useState, useRef, useEffect } from 'react';
 import { ChevronDown } from 'lucide-react';
 
 export default function AutocompleteInput({ 
-  value, 
+  value = '', 
   onChange, 
   suggestions = [], 
   placeholder, 
@@ -15,13 +15,17 @@ export default function AutocompleteInput({
   const inputRef = useRef(null);
   const dropdownRef = useRef(null);
 
+  const normalise = (input) => (typeof input === 'string' ? input : String(input ?? ''));
+  const inputValue = normalise(value);
+
   useEffect(() => {
-    const filtered = suggestions.filter(suggestion =>
-      suggestion.toLowerCase().includes(value.toLowerCase()) && 
-      suggestion.toLowerCase() !== value.toLowerCase()
-    ).slice(0, 5);
+    const loweredValue = inputValue.toLowerCase();
+    const filtered = suggestions
+      .map((suggestion) => normalise(suggestion))
+      .filter((suggestion) => suggestion.toLowerCase().includes(loweredValue) && suggestion.toLowerCase() !== loweredValue)
+      .slice(0, 5);
     setFilteredSuggestions(filtered);
-  }, [value, suggestions]);
+  }, [inputValue, suggestions]);
 
   useEffect(() => {
     const handleClickOutside = (event) => {
@@ -35,28 +39,34 @@ export default function AutocompleteInput({
     return () => document.removeEventListener('mousedown', handleClickOutside);
   }, []);
 
-  const handleInputChange = (e) => {
-    onChange(e);
-    if (e.target.value.length > 0) {
+  const emitChange = (nextValue) => {
+    if (typeof onChange === 'function') {
+      onChange(nextValue);
+    }
+  };
+
+  const handleInputChange = (event) => {
+    const nextValue = event?.target?.value ?? '';
+    emitChange(nextValue);
+    if (nextValue.length > 0) {
       setIsOpen(true);
     }
   };
 
   const handleSuggestionClick = (suggestion) => {
-    const event = { target: { name, value: suggestion } };
-    onChange(event);
+    emitChange(normalise(suggestion));
     setIsOpen(false);
     inputRef.current?.focus();
   };
 
   const handleInputFocus = () => {
-    if (filteredSuggestions.length > 0 && value.length > 0) {
+    if (filteredSuggestions.length > 0 && inputValue.length > 0) {
       setIsOpen(true);
     }
   };
 
-  const handleKeyDown = (e) => {
-    if (e.key === 'Escape') {
+  const handleKeyDown = (event) => {
+    if (event.key === 'Escape') {
       setIsOpen(false);
     }
   };
@@ -68,7 +78,7 @@ export default function AutocompleteInput({
           ref={inputRef}
           type="text"
           name={name}
-          value={value}
+          value={inputValue}
           onChange={handleInputChange}
           onFocus={handleInputFocus}
           onKeyDown={handleKeyDown}
@@ -79,7 +89,7 @@ export default function AutocompleteInput({
         {suggestions.length > 0 && (
           <button
             type="button"
-            onClick={() => setIsOpen(!isOpen)}
+            onClick={() => setIsOpen((prev) => !prev)}
             className="absolute right-2 top-1/2 transform -translate-y-1/2 text-purple-600 hover:text-purple-800 transition-colors"
           >
             <ChevronDown className={`w-4 h-4 transition-transform ${isOpen ? 'rotate-180' : ''}`} />

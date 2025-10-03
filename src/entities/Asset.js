@@ -1,51 +1,8 @@
-import { readCollection, writeCollection, generateId, nowIso } from './storage';
+import { readCollection, writeCollection, generateId, nowIso, clearItem } from './storage';
 
 const STORAGE_KEY = 'assets';
 
-const demoAssets = [
-  {
-    symbol: 'AAPL',
-    name: 'Apple Inc.',
-    type: 'stock',
-    broker: 'Fidelity',
-    quantity: 25,
-    purchase_price: 142.15,
-    current_price: 189.63,
-    previous_price: 185.50,
-  },
-  {
-    symbol: 'TSLA',
-    name: 'Tesla Motors',
-    type: 'stock',
-    broker: 'Robinhood',
-    quantity: 8,
-    purchase_price: 215.32,
-    current_price: 252.81,
-    previous_price: 248.10,
-  },
-  {
-    symbol: 'ETH',
-    name: 'Ethereum',
-    type: 'crypto',
-    broker: 'Coinbase',
-    quantity: 2.5,
-    purchase_price: 1750.40,
-    current_price: 1898.33,
-    previous_price: 1876.12,
-  },
-  {
-    symbol: 'VOO',
-    name: 'Vanguard S&P 500 ETF',
-    type: 'etf',
-    broker: 'Vanguard',
-    quantity: 12,
-    purchase_price: 403.21,
-    current_price: 427.55,
-    previous_price: 425.12,
-  }
-];
-
-let seeded = false;
+let currentUserId = null;
 
 const toNumber = (value, fallback = 0) => {
   const parsed = Number(value);
@@ -90,30 +47,23 @@ const calculateDerived = (asset) => {
     gain_loss: Number(gainLoss.toFixed(2)),
     gain_loss_percent: Number(gainLossPercent.toFixed(2)),
     day_change: Number(dayChange.toFixed(2)),
-    day_change_percent: Number(dayChangePercent.toFixed(2))
+    day_change_percent: Number(dayChangePercent.toFixed(2)),
   };
 };
 
-const ensureSeed = () => {
-  if (seeded) {
+const storageKeyFor = (userId = currentUserId) => (userId ? `${STORAGE_KEY}_${userId}` : STORAGE_KEY);
+
+const readAssets = () => readCollection(storageKeyFor());
+const writeAssets = (collection) => writeCollection(storageKeyFor(), collection);
+
+const migrateLegacyData = (userId) => {
+  if (!userId) {
     return;
   }
-  const current = readCollection(STORAGE_KEY);
-  if (!current || current.length === 0) {
-    const now = nowIso();
-    const seededAssets = demoAssets.map((asset) => {
-      const withMeta = {
-        id: generateId(),
-        created_at: now,
-        updated_at: now,
-        ...asset,
-        symbol: normaliseSymbol(asset.symbol),
-      };
-      return calculateDerived(withMeta);
-    });
-    writeCollection(STORAGE_KEY, seededAssets);
+  const legacyCollection = readCollection(STORAGE_KEY);
+  if (legacyCollection && legacyCollection.length > 0) {
+    clearItem(STORAGE_KEY);
   }
-  seeded = true;
 };
 
 const clone = (asset) => ({ ...asset });
@@ -136,11 +86,25 @@ const sortAssets = (collection) => {
   });
 };
 
-export const Asset = {
+const Asset = {
+  setCurrentUser(userId) {
+    const normalised = userId ? String(userId) : null;
+    if (normalised === currentUserId) {
+      return;
+    }
+    if (normalised) {
+      migrateLegacyData(normalised);
+    }
+    currentUserId = normalised;
+  },
+
+  clearAllForCurrentUser() {
+    writeCollection(storageKeyFor(), []);
+  },
+
   async list() {
-    ensureSeed();
-    const collection = readCollection(STORAGE_KEY);
-    return sortAssets(collection).map(clone);
+    const collection = sortAssets(readAssets());
+    return collection.map(clone);
   },
 
   async filter(criteria = {}) {
@@ -156,8 +120,7 @@ export const Asset = {
   },
 
   async create(input) {
-    ensureSeed();
-    const collection = readCollection(STORAGE_KEY);
+    const collection = readAssets();
     const now = nowIso();
     const payload = calculateDerived({
       id: generateId(),
@@ -178,13 +141,12 @@ export const Asset = {
       previous_price: input.previous_price,
     });
     collection.push(payload);
-    writeCollection(STORAGE_KEY, collection);
+    writeAssets(collection);
     return clone(payload);
   },
 
   async update(id, updates) {
-    ensureSeed();
-    const collection = readCollection(STORAGE_KEY);
+    const collection = readAssets();
     const index = findIndex(collection, id);
     assertAssetExists(index, id);
 
@@ -197,19 +159,20 @@ export const Asset = {
 
     const recalculated = calculateDerived(merged);
     collection[index] = recalculated;
-    writeCollection(STORAGE_KEY, collection);
+    writeAssets(collection);
     return clone(recalculated);
   },
 
   async delete(id) {
-    ensureSeed();
-    const collection = readCollection(STORAGE_KEY);
+    const collection = readAssets();
     const index = findIndex(collection, id);
     assertAssetExists(index, id);
     collection.splice(index, 1);
-    writeCollection(STORAGE_KEY, collection);
+    writeAssets(collection);
     return true;
   },
 };
+
+export { Asset };
 
 export default Asset;

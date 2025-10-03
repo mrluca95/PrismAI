@@ -1,0 +1,172 @@
+﻿import React, { useState } from 'react';
+import { useNavigate } from 'react-router-dom';
+import { useAuth } from '@/context/AuthContext.jsx';
+import { createPageUrl } from '@/utils';
+import { Button } from '@/components/ui/button.jsx';
+
+const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL || '').replace(/\/?$/, '');
+
+const initialForm = {
+  name: '',
+  email: '',
+  password: '',
+};
+
+const Input = ({ label, type = 'text', name, value, onChange, autoComplete, required = true }) => (
+  <label className="flex flex-col text-sm font-medium text-purple-800">
+    {label}
+    <input
+      type={type}
+      name={name}
+      value={value}
+      onChange={onChange}
+      autoComplete={autoComplete}
+      required={required}
+      className="mt-2 rounded-xl border border-purple-200 bg-white/80 px-4 py-3 text-purple-900 focus:outline-none focus:ring-2 focus:ring-purple-500"
+    />
+  </label>
+);
+
+export default function Login() {
+  const [mode, setMode] = useState('login');
+  const [form, setForm] = useState(initialForm);
+  const [submitting, setSubmitting] = useState(false);
+  const [formError, setFormError] = useState(null);
+  const [autoRegisterPrompt, setAutoRegisterPrompt] = useState(false);
+  const navigate = useNavigate();
+  const { login, register, providers, loading } = useAuth();
+
+  const handleInputChange = (event) => {
+    const { name, value } = event.target;
+    setForm((prev) => ({ ...prev, [name]: value }));
+  };
+
+  const switchMode = () => {
+    setMode((prev) => (prev === 'login' ? 'register' : 'login'));
+    setForm(initialForm);
+    setFormError(null);
+    setAutoRegisterPrompt(false);
+  };
+
+  const handleSubmit = async (event) => {
+    event.preventDefault();
+    setSubmitting(true);
+    setFormError(null);
+    setAutoRegisterPrompt(false);
+    try {
+      if (mode === 'login') {
+        await login({ email: form.email, password: form.password });
+      } else {
+        await register({ email: form.email, password: form.password, name: form.name });
+      }
+      navigate(createPageUrl('Dashboard'), { replace: true });
+    } catch (error) {
+      if (mode === 'login' && (error?.status === 401 || error?.status === 404)) {
+        setFormError("No account found for these credentials. Let's create one!");
+        setMode('register');
+        setAutoRegisterPrompt(true);
+        setForm((prev) => ({ ...initialForm, email: prev.email, password: prev.password }));
+      } else {
+        setFormError(error?.message || 'Authentication failed. Please try again.');
+        setAutoRegisterPrompt(false);
+      }
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  const googleEnabled = providers?.google && API_BASE_URL;
+  const googleHref = googleEnabled ? `${API_BASE_URL}/auth/google` : null;
+
+  return (
+    <div className="min-h-screen flex items-center justify-center bg-gradient-to-b from-purple-100 via-white to-purple-100 p-4">
+      <div className="w-full max-w-md neomorph rounded-3xl bg-white/80 p-8 space-y-6">
+        <div className="text-center space-y-2">
+          <h1 className="text-3xl font-bold text-purple-900">Welcome to Prism AI</h1>
+          <p className="text-sm text-purple-600">
+            {mode === 'login' ? 'Sign in to continue to your investment copilot.' : 'Create an account to unlock personalized AI insights.'}
+          </p>
+        </div>
+
+        {mode === 'register' && autoRegisterPrompt && (
+          <div className="rounded-xl border border-purple-200 bg-purple-50 px-4 py-3 text-sm text-purple-700">
+            We couldn't find an account for that email. Complete the details below to create one.
+          </div>
+        )}
+
+        <form className="space-y-4" onSubmit={handleSubmit}>
+          {mode === 'register' && (
+            <Input
+              label="Full Name"
+              name="name"
+              value={form.name}
+              onChange={handleInputChange}
+              autoComplete="name"
+            />
+          )}
+          <Input
+            label="Email"
+            name="email"
+            type="email"
+            value={form.email}
+            onChange={handleInputChange}
+            autoComplete="email"
+          />
+          <Input
+            label="Password"
+            name="password"
+            type="password"
+            value={form.password}
+            onChange={handleInputChange}
+            autoComplete={mode === 'login' ? 'current-password' : 'new-password'}
+          />
+
+          {formError && <p className="text-sm text-red-500">{formError}</p>}
+
+          <Button
+            type="submit"
+            disabled={submitting || loading}
+            className="w-full bg-purple-600 hover:bg-purple-700 text-white px-4 py-3 text-base"
+          >
+            {submitting ? 'Please wait...' : mode === 'login' ? 'Sign In' : 'Create Account'}
+          </Button>
+        </form>
+
+        {googleEnabled && (
+          <div className="space-y-4">
+            <div className="flex items-center gap-2 text-xs uppercase text-purple-400">
+              <span className="flex-1 border-t border-purple-200" />
+              <span>or</span>
+              <span className="flex-1 border-t border-purple-200" />
+            </div>
+            <a
+              href={googleHref}
+              className="w-full inline-flex items-center justify-center gap-2 rounded-xl border border-purple-200 bg-white px-4 py-3 text-sm font-medium text-purple-700 transition hover:border-purple-400 hover:bg-purple-50"
+            >
+              <img src="https://www.gstatic.com/firebasejs/ui/2.0.0/images/auth/google.svg" alt="Google" className="h-5 w-5" />
+              Continue with Google
+            </a>
+          </div>
+        )}
+
+        <div className="text-center text-sm text-purple-700">
+          {mode === 'login' ? (
+            <span>
+              New to Prism?{' '}
+              <button type="button" onClick={switchMode} className="font-semibold text-purple-800 hover:underline">
+                Create an account
+              </button>
+            </span>
+          ) : (
+            <span>
+              Already have an account?{' '}
+              <button type="button" onClick={switchMode} className="font-semibold text-purple-800 hover:underline">
+                Sign in instead
+              </button>
+            </span>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}

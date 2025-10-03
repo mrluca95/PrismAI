@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useRef, useCallback } from "react";
-import { Asset, AIInsight, User } from "@/entities/all";
+import { Asset, AIInsight } from "@/entities/all";
 import { useNavigate } from 'react-router-dom';
+import { useAuth } from '@/context/AuthContext.jsx';
 import BalanceCard from "../components/dashboard/BalanceCard";
 import AIInsightsCard from "../components/dashboard/AIInsightsCard";
 import QuickStats from "../components/dashboard/QuickStats";
@@ -34,19 +35,13 @@ export default function Dashboard({ setPerformanceSign = () => {} }) {
   const isInitialized = useRef(false);
   const navigate = useNavigate();
 
+  const { user } = useAuth();
+
   useEffect(() => {
-    const checkOnboarding = async () => {
-      try {
-        const user = await User.me();
-        if (!user.onboardingCompleted) {
-          navigate(createPageUrl("Onboarding"), { replace: true });
-        }
-      } catch (e) {
-        // Not logged in, do nothing, assume public or login flow will handle
-      }
-    };
-    checkOnboarding();
-  }, [navigate]);
+    if (user && !user.onboardingCompleted) {
+      navigate(createPageUrl("Onboarding"), { replace: true });
+    }
+  }, [user, navigate]);
 
   const syncAssetPrices = useCallback(async (currentAssets) => {
     if (!currentAssets || currentAssets.length === 0) {
@@ -315,6 +310,31 @@ export default function Dashboard({ setPerformanceSign = () => {} }) {
           </Popover>
         </div>
       </div>
+
+      {!isLoading && assets.length === 0 && (
+        <div className="neomorph rounded-2xl p-6 bg-purple-50 border border-purple-100 flex flex-col md:flex-row md:items-center md:justify-between gap-4">
+          <div className="flex items-start space-x-3">
+            <div className="neomorph rounded-full p-3 bg-white/70">
+              <Plus className="w-5 h-5 text-purple-600" />
+            </div>
+            <div>
+              <h2 className="text-lg font-semibold text-purple-900">Add your first transaction</h2>
+              <p className="text-sm text-purple-700">
+                Your portfolio is empty. Record a transaction to start tracking performance with Prism AI.
+              </p>
+            </div>
+          </div>
+          <button
+            onClick={() => {
+              setShowGetStartedPopover(false);
+              setIsAddMenuOpen(true);
+            }}
+            className="self-start md:self-auto neomorph rounded-xl px-4 py-2 text-sm font-semibold text-purple-700 neomorph-hover transition-all duration-300"
+          >
+            Add Investment
+          </button>
+        </div>
+      )}
 
       {/* Balance Card */}
       <BalanceCard

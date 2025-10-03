@@ -1,8 +1,8 @@
 
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useMemo, useCallback } from 'react';
 import { Transaction } from '@/entities/Transaction';
 import { Asset } from '@/entities/Asset';
-import { FetchPriceDetails } from '@/integrations/Core';
+import { FetchPriceDetails, SearchSymbols, InvokeLLM, FetchQuotes } from '@/integrations/Core';
 import { Loader2, Search } from 'lucide-react';
 import { debounce } from 'lodash';
 import AutocompleteInput from '../ui/AutocompleteInput';
@@ -22,11 +22,15 @@ export default function TransactionForm({ assets, onSuccess, onCancel }) {
     type: 'buy',
     quantity: '',
     date: new Date().toISOString().split('T')[0], // YYYY-MM-DD format
+    time: new Date().toTimeString().slice(0, 5), // HH:mm in local time
     broker: '' // Initialize broker to empty for autocompletion
   });
   const [fetchedAssetInfo, setFetchedAssetInfo] = useState({ 
     historical_price: '', 
+    historical_price_date: '', 
+    historical_price_timestamp: '', 
     current_price: '', 
+    current_price_timestamp: '', 
     name: '', 
     type: '' 
   });
@@ -34,44 +38,108 @@ export default function TransactionForm({ assets, onSuccess, onCancel }) {
   const [error, setError] = useState('');
   const [isFetchingPrice, setIsFetchingPrice] = useState(false);
   const [priceError, setPriceError] = useState('');
-  const [symbolSuggestions, setSymbolSuggestions] = useState([]);
+  const [symbolSuggestions, setSymbolSuggestions] = useState(POPULAR_SYMBOLS.map((symbol) => ({ value: symbol, label: symbol })));
   const [showSuggestions, setShowSuggestions] = useState(false);
+  const [symbolDirectory, setSymbolDirectory] = useState(() => Object.create(null));
+  const popularSuggestions = useMemo(() => POPULAR_SYMBOLS.map((symbol) => ({ value: symbol, label: symbol })), []);
+  const fetchSymbolSuggestions = useMemo(() => debounce(async (rawQuery) => {
+    const query = String(rawQuery || '').trim();
+    if (!query) {
+      setSymbolSuggestions([...popularSuggestions]);
+      setShowSuggestions(false);
+      return;
+    }
 
-  const uniqueBrokers = [...new Set(assets.map(asset => asset.broker))];
-  
-  // Get all unique symbols from existing assets plus popular ones
-  const allSymbols = [...new Set([
-    ...assets.map(asset => asset.symbol),
-    ...POPULAR_SYMBOLS
-  ])].sort();
+    try {
+      const result = await SearchSymbols(query);
+      const quotes = Array.isArray(result?.symbols) ? result.symbols : [];
+      const matches = quotes
+        .map((item) => {
+          const symbolValue = String(item?.symbol || '').toUpperCase();
+          if (!symbolValue) {
+            return null;
+          }
+          const label = item?.name ? `${symbolValue} — ${item.name}` : symbolValue;
+          return { value: symbolValue, label };
+        })
+        .filter(Boolean)
+        .slice(0, 20);
+
+      if (matches.length > 0) {
+        setSymbolSuggestions(matches);
+        setShowSuggestions(true);
+        setSymbolDirectory((prev) => {
+          const next = { ...prev };
+          quotes.forEach((item) => {
+            const symbolValue = String(item?.symbol || '').toUpperCase();
+            if (!symbolValue) {
+              return;
+            }
+            next[symbolValue] = {
+              name: item?.name || next[symbolValue]?.name || '',
+              type: item?.type || next[symbolValue]?.type || 'stock',
+              exchange: item?.exchange || next[symbolValue]?.exchange || '',
+            };
+          });
+          return next;
+        });
+      } else {
+        const fallback = popularSuggestions.filter((entry) => entry.value.includes(query.toUpperCase()));
+        setSymbolSuggestions(fallback.length ? fallback : [...popularSuggestions]);
+        setShowSuggestions(Boolean(query) && fallback.length > 0);
+      }
+    } catch (error) {
+      console.warn('[TransactionForm] symbol lookup failed', error);
+      const fallback = popularSuggestions.filter((entry) => entry.value.includes(query.toUpperCase()));
+      setSymbolSuggestions(fallback.length ? fallback : [...popularSuggestions]);
+      setShowSuggestions(Boolean(query) && fallback.length > 0);
+    }
+  }, 300), [popularSuggestions]);
+
+
+  const uniqueBrokers = [...new Set(assets.map((asset) => asset.broker).filter(Boolean))];
 
   const handleChange = (e) => {
     const { name, value } = e.target;
-    setFormData(prev => ({ ...prev, [name]: value }));
-    
-    // Handle symbol input for suggestions
     if (name === 'asset_symbol') {
-      const filteredSuggestions = allSymbols.filter(symbol =>
-        symbol.toLowerCase().includes(value.toLowerCase()) && value.length > 0
-      ).slice(0, 8);
-      setSymbolSuggestions(filteredSuggestions);
-      setShowSuggestions(value.length > 0 && filteredSuggestions.length > 0);
+      const uppercaseValue = value.toUpperCase();
+      setFormData((prev) => ({ ...prev, asset_symbol: uppercaseValue }));
+      fetchSymbolSuggestions(uppercaseValue);
+      return;
     }
+
+    setFormData((prev) => ({ ...prev, [name]: value }));
   };
 
   const handleBrokerChange = (value) => {
-    setFormData(prev => ({ ...prev, broker: value }));
+    setFormData((prev) => ({ ...prev, broker: value }));
   };
 
-  const handleSymbolSelect = (symbol) => {
-    setFormData(prev => ({ ...prev, asset_symbol: symbol }));
+  useEffect(() => {
+    return () => {
+      if (typeof fetchSymbolSuggestions.cancel === 'function') {
+        fetchSymbolSuggestions.cancel();
+      }
+    };
+  }, [fetchSymbolSuggestions]);
+
+  useEffect(() => {
+    fetchSymbolSuggestions(formData.asset_symbol);
+  }, [formData.asset_symbol, fetchSymbolSuggestions]);
+
+  const handleSymbolSelect = (symbolOption) => {
+    const selected = typeof symbolOption === 'string' ? symbolOption : symbolOption?.value;
+    if (!selected) {
+      return;
+    }
+    const upper = selected.toUpperCase();
+    setFormData((prev) => ({ ...prev, asset_symbol: upper }));
     setShowSuggestions(false);
-    setSymbolSuggestions([]);
   };
 
   // eslint-disable-next-line react-hooks/exhaustive-deps
   const fetchAssetDetails = useCallback(
-    debounce(async (rawSymbol, date) => {
+    debounce(async (rawSymbol, date, time) => {
       const symbol = (rawSymbol || '').trim().toUpperCase();
       if (!symbol || !date) {
         return;
@@ -79,22 +147,25 @@ export default function TransactionForm({ assets, onSuccess, onCancel }) {
 
       setIsFetchingPrice(true);
       setPriceError('');
-      setFetchedAssetInfo({ historical_price: '', historical_price_date: '', current_price: '', name: '', type: '' });
+      setFetchedAssetInfo({ historical_price: '', historical_price_date: '', historical_price_timestamp: '', current_price: '', current_price_timestamp: '', name: '', type: '' });
 
       const existingAsset = assets.find((asset) => asset.symbol === symbol);
 
       try {
-        const result = await FetchPriceDetails({ symbol, date });
+        const result = await FetchPriceDetails({ symbol, date, time });
         const historical = Number(result?.historical_price);
         const current = Number(result?.current_price);
         if (Number.isFinite(historical) && Number.isFinite(current)) {
-          const resolvedName = result.name || (existingAsset && existingAsset.name) || symbol;
-          const resolvedType = result.type || (existingAsset && existingAsset.type) || 'stock';
+          const directoryMeta = symbolDirectory[symbol] || {};
+          const resolvedName = result.name || existingAsset?.name || directoryMeta.name || symbol;
+          const resolvedType = result.type || existingAsset?.type || directoryMeta.type || 'stock';
 
           setFetchedAssetInfo({
             historical_price: historical,
             historical_price_date: result.historical_price_date || date,
+            historical_price_timestamp: result.historical_price_timestamp || '',
             current_price: current,
+            current_price_timestamp: result.current_price_timestamp || '',
             name: resolvedName,
             type: resolvedType,
           });
@@ -112,12 +183,39 @@ export default function TransactionForm({ assets, onSuccess, onCancel }) {
   ); // 500ms debounce
 
   useEffect(() => {
-    fetchAssetDetails(formData.asset_symbol.toUpperCase(), formData.date);
-  }, [formData.asset_symbol, formData.date, fetchAssetDetails]);
+    fetchAssetDetails(formData.asset_symbol.toUpperCase(), formData.date, formData.time);
+  }, [formData.asset_symbol, formData.date, formData.time, fetchAssetDetails]);
+
+  const formatTimestampLabel = (timestamp, fallback) => {
+    if (timestamp) {
+      const parsed = new Date(timestamp);
+      if (!Number.isNaN(parsed.getTime())) {
+        return parsed.toLocaleString(undefined, {
+          year: 'numeric',
+          month: 'short',
+          day: 'numeric',
+          hour: '2-digit',
+          minute: '2-digit',
+        });
+      }
+    }
+    return fallback || null;
+  };
+
+  const purchasePriceLabel = formatTimestampLabel(
+    fetchedAssetInfo.historical_price_timestamp,
+    fetchedAssetInfo.historical_price_date
+      ? `${fetchedAssetInfo.historical_price_date}${formData.time ? ' ' + formData.time : ''}`
+      : null,
+  );
+  const currentPriceLabel = formatTimestampLabel(
+    fetchedAssetInfo.current_price_timestamp,
+    null,
+  );
 
   const handleSubmit = async (e) => {
     e.preventDefault();
-    if (!formData.asset_symbol || !formData.quantity || !fetchedAssetInfo.historical_price || !fetchedAssetInfo.current_price || !formData.date || !formData.broker) {
+    if (!formData.asset_symbol || !formData.quantity || !fetchedAssetInfo.historical_price || !fetchedAssetInfo.current_price || !formData.date || !formData.time || !formData.broker) {
       setError('All fields must be filled and asset details must be fetched successfully.');
       return;
     }
@@ -126,14 +224,19 @@ export default function TransactionForm({ assets, onSuccess, onCancel }) {
     
     try {
       const transactionQuantity = parseFloat(formData.quantity);
+      const purchaseDateTime = new Date(`${formData.date}T${(formData.time || '00:00').padStart(5, '0')}:00`);
+      if (Number.isNaN(purchaseDateTime.getTime())) {
+        throw new Error('Invalid purchase date/time.');
+      }
       const historicalPrice = parseFloat(fetchedAssetInfo.historical_price);
       const currentPrice = parseFloat(fetchedAssetInfo.current_price);
       const symbol = formData.asset_symbol.toUpperCase();
 
       const existingAssets = await Asset.filter({ symbol });
       const existingAsset = existingAssets.length > 0 ? existingAssets[0] : null;
-      const assetName = fetchedAssetInfo.name || (existingAsset && existingAsset.name) || symbol;
-      const assetType = fetchedAssetInfo.type || (existingAsset && existingAsset.type) || 'stock';
+      const directoryMeta = symbolDirectory[symbol] || {};
+      const assetName = fetchedAssetInfo.name || existingAsset?.name || directoryMeta.name || symbol;
+      const assetType = fetchedAssetInfo.type || existingAsset?.type || directoryMeta.type || 'stock';
 
       if (formData.type === 'buy') {
         if (existingAsset) {
@@ -196,7 +299,8 @@ export default function TransactionForm({ assets, onSuccess, onCancel }) {
         type: formData.type,
         quantity: transactionQuantity,
         price: historicalPrice, // Use historical price for the transaction record
-        date: new Date(formData.date).toISOString(),
+        price_timestamp: fetchedAssetInfo.historical_price_timestamp || purchaseDateTime.toISOString(),
+        date: purchaseDateTime.toISOString(),
         broker: formData.broker,
         total_cost: transactionQuantity * historicalPrice,
       });
@@ -236,16 +340,16 @@ export default function TransactionForm({ assets, onSuccess, onCancel }) {
         </div>
         
         {/* Suggestions dropdown */}
-        {showSuggestions && (
+        {showSuggestions && symbolSuggestions.length > 0 && (
           <div className="absolute z-10 w-full mt-1 neomorph rounded-xl bg-purple-100 max-h-48 overflow-y-auto">
-            {symbolSuggestions.map((symbol) => (
+            {symbolSuggestions.map((option) => (
               <button
-                key={symbol}
+                key={option.value}
                 type="button"
-                onClick={() => handleSymbolSelect(symbol)}
+                onClick={() => handleSymbolSelect(option)}
                 className="w-full px-4 py-2 text-left text-purple-800 hover:bg-purple-200 first:rounded-t-xl last:rounded-b-xl transition-colors"
               >
-                {symbol}
+                {option.label}
               </button>
             ))}
           </div>
@@ -274,7 +378,7 @@ export default function TransactionForm({ assets, onSuccess, onCancel }) {
         </div>
       </div>
 
-      <div className="grid grid-cols-2 gap-4">
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
         <div>
           <label className="text-sm font-medium text-purple-800 mb-2 block">Quantity</label>
           <input type="number" step="any" name="quantity" value={formData.quantity} onChange={handleChange} placeholder="0.00" className="w-full neomorph-inset rounded-xl px-4 py-3 text-purple-900 bg-transparent" required />
@@ -282,6 +386,10 @@ export default function TransactionForm({ assets, onSuccess, onCancel }) {
         <div>
           <label className="text-sm font-medium text-purple-800 mb-2 block">Purchase Date</label>
           <input type="date" name="date" value={formData.date} onChange={handleChange} className="w-full neomorph-inset rounded-xl px-4 py-3 text-purple-900 bg-transparent" required />
+        </div>
+        <div>
+          <label className="text-sm font-medium text-purple-800 mb-2 block">Purchase Time</label>
+          <input type="time" name="time" value={formData.time} onChange={handleChange} className="w-full neomorph-inset rounded-xl px-4 py-3 text-purple-900 bg-transparent" required />
         </div>
       </div>
 
@@ -298,13 +406,13 @@ export default function TransactionForm({ assets, onSuccess, onCancel }) {
           ) : fetchedAssetInfo.historical_price && fetchedAssetInfo.current_price ? (
             <div className="space-y-1">
               <div className="flex justify-between items-center">
-                <span className="text-sm text-purple-700">Purchase Price ({fetchedAssetInfo.historical_price_date || formData.date}):</span>
+                <span className="text-sm text-purple-700">Purchase Price{purchasePriceLabel ? ` (${purchasePriceLabel})` : ''}:</span>
                 <span className="font-semibold text-purple-900">
                   {format(fetchedAssetInfo.historical_price, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
                 </span>
               </div>
               <div className="flex justify-between items-center">
-                <span className="text-sm text-purple-700">Current Price:</span>
+                <span className="text-sm text-purple-700">Current Price{currentPriceLabel ? ` (${currentPriceLabel})` : ''}:</span>
                 <span className="font-semibold text-purple-900">
                   {format(fetchedAssetInfo.current_price, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
                 </span>
@@ -333,5 +441,6 @@ export default function TransactionForm({ assets, onSuccess, onCancel }) {
     </form>
   );
 }
+
 
 

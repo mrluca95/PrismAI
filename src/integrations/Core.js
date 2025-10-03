@@ -20,8 +20,12 @@ async function requestJson(path, { method = 'POST', body, headers = {} } = {}) {
 
   const response = await fetch(`${API_BASE_URL}${path}`, {
     method,
-    headers,
+    headers: {
+      Accept: 'application/json',
+      ...headers,
+    },
     body,
+    credentials: 'include',
   });
 
   const text = await response.text();
@@ -94,7 +98,7 @@ export async function ExtractDataFromUploadedFile({ file_url: fileUrl, json_sche
   });
 }
 
-export async function FetchPriceDetails({ symbol, date }) {
+export async function FetchPriceDetails({ symbol, date, time }) {
   const normalizedSymbol = String(symbol || '').trim().toUpperCase();
   if (!normalizedSymbol) {
     throw new Error('symbol is required');
@@ -102,16 +106,43 @@ export async function FetchPriceDetails({ symbol, date }) {
   if (!date) {
     throw new Error('date is required');
   }
+  const normalizedTime = time ? String(time).trim() : '';
 
   if (!HAS_BACKEND) {
-    return fallbackFetchPriceDetails({ symbol: normalizedSymbol, date });
+    return fallbackFetchPriceDetails({ symbol: normalizedSymbol, date, time: normalizedTime });
+  }
+
+  const payload = { symbol: normalizedSymbol, date };
+  if (normalizedTime) {
+    payload.time = normalizedTime;
   }
 
   return requestJson('/api/prices/details', {
-    body: JSON.stringify({ symbol: normalizedSymbol, date }),
+    body: JSON.stringify(payload),
     headers: { 'Content-Type': 'application/json' },
   });
 }
+export async function SearchSymbols(query = '') {
+  const trimmed = String(query || '').trim();
+  if (!trimmed) {
+    return { symbols: [] };
+  }
+
+  if (!HAS_BACKEND) {
+    return fallbackSearchSymbols(trimmed);
+  }
+
+  const endpoint = `/api/symbols/search?q=${encodeURIComponent(trimmed)}`;
+
+  try {
+    const response = await requestJson(endpoint, { method: 'GET' });
+    return response || { symbols: [] };
+  } catch (error) {
+    console.warn('[Core] symbol search failed, falling back to local directory', error);
+    return fallbackSearchSymbols(trimmed);
+  }
+}
+
 export async function FetchQuotes(symbols = []) {
   const input = Array.isArray(symbols) ? symbols : [];
   const uniqueSymbols = [...new Set(input.map((symbol) => String(symbol || '').trim().toUpperCase()).filter(Boolean))];
@@ -134,12 +165,39 @@ export async function FetchQuotes(symbols = []) {
 // Legacy fallbacks (mocked data)
 // ----------------------
 
+const fallbackSearchSymbols = (query) => {
+  const lowered = String(query || '').trim().toLowerCase();
+  if (!lowered) {
+    return { symbols: [] };
+  }
+  const matches = Object.entries(symbolDirectory)
+    .filter(([symbol, meta]) => {
+      const label = `${symbol} ${meta?.name || ''}`.toLowerCase();
+      return label.includes(lowered);
+    })
+    .slice(0, 10)
+    .map(([symbol, meta]) => ({
+      symbol,
+      name: meta?.name || '',
+      exchange: meta?.exchange || '',
+      type: meta?.type || '',
+    }));
+  return { symbols: matches };
+};
+
 const symbolDirectory = {
   AAPL: { name: 'Apple Inc.', type: 'stock', exchange: 'NASDAQ' },
+  MSFT: { name: 'Microsoft Corporation', type: 'stock', exchange: 'NASDAQ' },
+  GOOGL: { name: 'Alphabet Inc. Class A', type: 'stock', exchange: 'NASDAQ' },
+  AMZN: { name: 'Amazon.com, Inc.', type: 'stock', exchange: 'NASDAQ' },
+  META: { name: 'Meta Platforms, Inc.', type: 'stock', exchange: 'NASDAQ' },
   TSLA: { name: 'Tesla Motors', type: 'stock', exchange: 'NASDAQ' },
+  NVDA: { name: 'NVIDIA Corporation', type: 'stock', exchange: 'NASDAQ' },
+  SPY: { name: 'SPDR S&P 500 ETF Trust', type: 'etf', exchange: 'NYSE' },
+  QQQ: { name: 'Invesco QQQ Trust', type: 'etf', exchange: 'NASDAQ' },
+  VOO: { name: 'Vanguard S&P 500 ETF', type: 'etf', exchange: 'NYSE' },
   ETH: { name: 'Ethereum', type: 'crypto', exchange: 'Coinbase' },
   BTC: { name: 'Bitcoin', type: 'crypto', exchange: 'Coinbase' },
-  VOO: { name: 'Vanguard S&P 500 ETF', type: 'etf', exchange: 'NYSE' },
 };
 
 const hashNumber = (value) => {
@@ -208,7 +266,7 @@ const fallbackBuildMarketStatus = (prompt) => {
   return { status: 'closed', next_opening_time: next.toISOString(), exchange_name: 'NYSE' };
 };
 
-const fallbackFetchPriceDetails = async ({ symbol, date }) => {
+const fallbackFetchPriceDetails = async ({ symbol, date, time }) => {
   await delay(80);
   const upperSymbol = String(symbol || '').trim().toUpperCase();
   const basePrice = pseudoPrice(upperSymbol);
@@ -218,11 +276,22 @@ const fallbackFetchPriceDetails = async ({ symbol, date }) => {
   const today = new Date();
   const diffDays = Math.max(0, Math.floor((today - targetDate) / (1000 * 60 * 60 * 24)));
   const historical = basePrice * (1 - Math.min(diffDays, 30) * 0.0025);
+  const purchaseTimestamp = (() => {
+    if (!date) return null;
+    try {
+      const iso = `${date}T${(time || '00:00').padStart(5, '0')}:00`;
+      const parsed = new Date(iso);
+      return Number.isNaN(parsed.getTime()) ? null : parsed.toISOString();
+    } catch (error) {
+      return null;
+    }
+  })();
 
   return {
     symbol: upperSymbol,
     historical_price: Number(historical.toFixed(2)),
     historical_price_date: date,
+    historical_price_timestamp: purchaseTimestamp,
     current_price: Number(basePrice.toFixed(2)),
     current_price_timestamp: new Date().toISOString(),
     name: meta.name,
@@ -338,3 +407,5 @@ async function fallbackExtractData() {
 
 
 
+
+export { requestJson };

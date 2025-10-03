@@ -1,48 +1,22 @@
-import { readCollection, writeCollection, generateId, nowIso } from './storage';
+import { readCollection, writeCollection, generateId, nowIso, clearItem } from './storage';
 
 const STORAGE_KEY = 'ai_insights';
 
-const demoInsights = [
-  {
-    title: 'Tech Exposure Check',
-    description: '**Tech Exposure Check**\n\nAAPL and TSLA together make up more than 40% of your equity exposure. Consider incrementally adding healthcare or consumer staples names to balance the portfolio.\n\n[Source](https://www.investopedia.com/terms/d/diversification.asp)',
-    type: 'diversification',
-    priority: 'medium',
-    related_assets: ['AAPL', 'TSLA'],
-  },
-  {
-    title: 'Rebalance Growth Winners',
-    description: '**Rebalance Growth Winners**\n\nYour growth holdings have outperformed this quarter. Taking a small portion of gains and reallocating to dividend ETFs like VOO can lock in profits without reducing market exposure.\n\n[Source](https://www.fool.com/investing/how-to-invest/rebalancing/)',
-    type: 'rebalancing',
-    priority: 'low',
-    related_assets: ['VOO'],
-  },
-  {
-    title: 'Watch Crypto Volatility',
-    description: '**Watch Crypto Volatility**\n\nETH price swings remain elevated. Setting a price alert at +/-5% from today\'s price can help you react quickly without monitoring constantly.',
-    type: 'risk_alert',
-    priority: 'high',
-    related_assets: ['ETH'],
-  },
-];
+let currentUserId = null;
 
-let seeded = false;
+const storageKeyFor = (userId = currentUserId) => (userId ? `${STORAGE_KEY}_${userId}` : STORAGE_KEY);
 
-const ensureSeed = () => {
-  if (seeded) {
+const readInsights = () => readCollection(storageKeyFor());
+const writeInsights = (collection) => writeCollection(storageKeyFor(), collection);
+
+const migrateLegacyData = (userId) => {
+  if (!userId) {
     return;
   }
-  const existing = readCollection(STORAGE_KEY);
-  if (!existing || existing.length === 0) {
-    const now = nowIso();
-    const payload = demoInsights.map((insight, index) => ({
-      id: generateId(),
-      created_date: new Date(new Date(now).getTime() - index * 3600 * 1000).toISOString(),
-      ...insight,
-    }));
-    writeCollection(STORAGE_KEY, payload);
+  const legacyCollection = readCollection(STORAGE_KEY);
+  if (legacyCollection && legacyCollection.length > 0) {
+    clearItem(STORAGE_KEY);
   }
-  seeded = true;
 };
 
 const clone = (insight) => ({
@@ -75,10 +49,24 @@ const sortCollection = (collection, sortBy) => {
   });
 };
 
-export const AIInsight = {
+const AIInsight = {
+  setCurrentUser(userId) {
+    const normalised = userId ? String(userId) : null;
+    if (normalised === currentUserId) {
+      return;
+    }
+    if (normalised) {
+      migrateLegacyData(normalised);
+    }
+    currentUserId = normalised;
+  },
+
+  clearAllForCurrentUser() {
+    writeCollection(storageKeyFor(), []);
+  },
+
   async list(sortBy = '-created_date', limit) {
-    ensureSeed();
-    let collection = readCollection(STORAGE_KEY);
+    let collection = readInsights();
     collection = sortCollection(collection, sortBy);
     if (typeof limit === 'number') {
       collection = collection.slice(0, limit);
@@ -87,8 +75,7 @@ export const AIInsight = {
   },
 
   async create({ title, description, type = 'opportunity', priority = 'medium', related_assets = [] }) {
-    ensureSeed();
-    const collection = readCollection(STORAGE_KEY);
+    const collection = readInsights();
     const payload = {
       id: generateId(),
       created_date: nowIso(),
@@ -99,9 +86,11 @@ export const AIInsight = {
       related_assets: related_assets.filter(Boolean),
     };
     collection.unshift(payload);
-    writeCollection(STORAGE_KEY, collection);
+    writeInsights(collection);
     return clone(payload);
   },
 };
+
+export { AIInsight };
 
 export default AIInsight;
