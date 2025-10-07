@@ -652,7 +652,10 @@ app.post('/auth/register', async (req, res) => {
     const email = body.email.toLowerCase();
     const existing = await getUserByEmail(email);
     if (existing) {
-      return res.status(409).json({ error: 'An account with this email already exists.' });
+      return res.status(409).json({
+        error: 'ACCOUNT_EXISTS',
+        message: 'An account with this email already exists. Try signing in instead.',
+      });
     }
     const passwordHash = await bcrypt.hash(body.password, 12);
     const user = await createUser({
@@ -671,10 +674,19 @@ app.post('/auth/register', async (req, res) => {
     return res.status(201).json(payload);
   } catch (error) {
     if (error instanceof z.ZodError) {
-      return res.status(400).json({ error: 'INVALID_REQUEST', details: error.errors });
+      const firstIssue = error.errors?.[0];
+      let message = 'Please double-check the information you entered and try again.';
+      if (firstIssue?.path?.includes('email')) {
+        message = 'Please enter a valid email address.';
+      } else if (firstIssue?.path?.includes('password')) {
+        message = 'Password must be at least 8 characters long.';
+      } else if (firstIssue?.path?.includes('name')) {
+        message = 'Name must be between 1 and 120 characters.';
+      }
+      return res.status(400).json({ error: 'INVALID_REQUEST', message, details: error.errors });
     }
     console.error('[auth] register error', error);
-    return res.status(500).json({ error: 'Failed to register user.' });
+    return res.status(500).json({ error: 'REGISTER_FAILED', message: 'Failed to register user.' });
   }
 });
 
@@ -683,12 +695,24 @@ app.post('/auth/login', async (req, res) => {
     const body = loginSchema.parse(req.body);
     const email = body.email.toLowerCase();
     const user = await getUserByEmail(email, { includeSensitive: true });
-    if (!user?.passwordHash) {
-      return res.status(401).json({ error: 'Invalid email or password.' });
+    if (!user) {
+      return res.status(404).json({
+        error: 'ACCOUNT_NOT_FOUND',
+        message: "We couldn't find an account with that email address.",
+      });
+    }
+    if (!user.passwordHash) {
+      return res.status(403).json({
+        error: 'PASSWORD_LOGIN_UNAVAILABLE',
+        message: "This account was created with Google Sign-In. Use the Google option to continue.",
+      });
     }
     const passwordValid = await bcrypt.compare(body.password, user.passwordHash);
     if (!passwordValid) {
-      return res.status(401).json({ error: 'Invalid email or password.' });
+      return res.status(401).json({
+        error: 'INVALID_CREDENTIALS',
+        message: "Incorrect password. Please try again.",
+      });
     }
     const safeUser = sanitizeUser(user);
     await loginUser(req, safeUser);
@@ -696,10 +720,10 @@ app.post('/auth/login', async (req, res) => {
     return res.json(payload);
   } catch (error) {
     if (error instanceof z.ZodError) {
-      return res.status(400).json({ error: 'INVALID_REQUEST', details: error.errors });
+      return res.status(400).json({ error: 'INVALID_REQUEST', message: 'Please provide a valid email and password.', details: error.errors });
     }
     console.error('[auth] login error', error);
-    return res.status(500).json({ error: 'Failed to login.' });
+    return res.status(500).json({ error: 'LOGIN_FAILED', message: 'Failed to login.' });
   }
 });
 

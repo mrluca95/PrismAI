@@ -61,15 +61,38 @@ export default function Login() {
       }
       navigate(createPageUrl('Dashboard'), { replace: true });
     } catch (error) {
-      if (mode === 'login' && (error?.status === 401 || error?.status === 404)) {
-        setFormError("No account found for these credentials. Let's create one!");
-        setMode('register');
-        setAutoRegisterPrompt(true);
-        setForm((prev) => ({ ...initialForm, email: prev.email, password: prev.password }));
+      let message = error?.message || "Authentication failed. Please try again.";
+
+      if (mode === 'login') {
+        if (error?.status === 404 || error?.code === 'ACCOUNT_NOT_FOUND') {
+          message = "We couldn't find an account with that email. Let's create one!";
+          setMode('register');
+          setAutoRegisterPrompt(true);
+          setForm((prev) => ({ ...initialForm, email: prev.email, password: prev.password }));
+        } else if (error?.status === 401 || error?.code === 'INVALID_CREDENTIALS') {
+          message = "Incorrect password. Please try again.";
+          setAutoRegisterPrompt(false);
+        } else if (error?.status === 403 || error?.code === 'PASSWORD_LOGIN_UNAVAILABLE') {
+          message = "This account was created with Google Sign-In. Please use the Google option to continue.";
+          setAutoRegisterPrompt(false);
+        } else {
+          setAutoRegisterPrompt(false);
+        }
       } else {
-        setFormError(error?.message || 'Authentication failed. Please try again.');
-        setAutoRegisterPrompt(false);
+        if (error?.status === 409 || error?.code === 'ACCOUNT_EXISTS') {
+          message = "An account with this email already exists. Try signing in instead.";
+          setMode('login');
+          setAutoRegisterPrompt(false);
+          setForm((prev) => ({ ...initialForm, email: prev.email }));
+        } else if (error?.status === 400 && error?.message) {
+          message = error.message;
+          setAutoRegisterPrompt(false);
+        } else {
+          setAutoRegisterPrompt(false);
+        }
       }
+
+      setFormError(message);
     } finally {
       setSubmitting(false);
     }

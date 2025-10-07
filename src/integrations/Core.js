@@ -37,9 +37,17 @@ async function requestJson(path, { method = 'POST', body, headers = {} } = {}) {
   }
 
   if (!response.ok) {
-    const message = data?.error || data?.message || response.statusText || 'Request failed';
+    const message = data?.message || data?.error || response.statusText || 'Request failed';
     const error = new Error(message);
     error.status = response.status;
+    if (data && typeof data === 'object') {
+      if (data.error && typeof data.error === 'string') {
+        error.code = data.error;
+      }
+      if (data.details !== undefined) {
+        error.details = data.details;
+      }
+    }
     throw error;
   }
 
