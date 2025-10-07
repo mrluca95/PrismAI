@@ -84,15 +84,24 @@ export default function Login() {
           setMode('login');
           setAutoRegisterPrompt(false);
           setForm((prev) => ({ ...initialForm, email: prev.email }));
-        } else if (error?.status === 400 && error?.message) {
-          message = error.message;
+        } else if (error?.status === 400) {
+          const firstDetailMessage = Array.isArray(error?.details) ? error.details.find((item) => item?.message)?.message : null;
+          if (!message && firstDetailMessage) {
+            message = firstDetailMessage;
+          }
           setAutoRegisterPrompt(false);
+          setMode('register');
         } else {
           setAutoRegisterPrompt(false);
+          setMode('register');
         }
       }
 
+      if (!message) {
+        message = 'Something went wrong. Please try again.';
+      }
       setFormError(message);
+      console.warn('[auth] form error', { mode, status: error?.status, code: error?.code, message, details: error?.details });
     } finally {
       setSubmitting(false);
     }
