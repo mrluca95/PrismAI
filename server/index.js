@@ -648,7 +648,16 @@ app.get('/auth/me', optionalAuth, async (req, res) => respondWithCurrentUser(req
 
 app.post('/auth/register', async (req, res) => {
   try {
-    const body = registerSchema.parse(req.body);
+    const incoming = { ...req.body } || {};
+    if (typeof incoming.name === 'string') {
+      const trimmedName = incoming.name.trim();
+      if (trimmedName.length === 0) {
+        delete incoming.name;
+      } else {
+        incoming.name = trimmedName;
+      }
+    }
+    const body = registerSchema.parse(incoming);
     const email = body.email.toLowerCase();
     const existing = await getUserByEmail(email);
     if (existing) {
