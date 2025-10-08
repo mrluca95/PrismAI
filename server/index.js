@@ -1108,7 +1108,7 @@ app.post('/api/extract', requireAuth, async (req, res) => {
             role: 'user',
             content: [
               { type: 'text', text: instructions },
-              { type: 'input_image', image_url: { url: `data:${record.mimeType};base64,${base64}` } },
+              { type: 'image_url', image_url: { url: `data:${record.mimeType};base64,${base64}` } },
             ],
           },
         ],
