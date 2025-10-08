@@ -114,6 +114,35 @@ if (process.env.OPENAI_API_KEY) {
 
 const uploadStore = new Map();
 
+const sanitizeOpenAIError = (error, fallback = 'AI request failed.') => {
+  const status = error?.status ?? error?.response?.status ?? 502;
+  let message = fallback;
+
+  const responseMessage = error?.response?.data?.error?.message
+    || error?.response?.data?.error
+    || error?.response?.data
+    || error?.message;
+
+  if (typeof responseMessage === 'string' && responseMessage.trim().length > 0) {
+    message = responseMessage;
+  }
+
+  if (typeof message === 'string') {
+    message = message.replace(/(sk|OPENAI)[-_A-Za-z0-9]+/g, '[redacted key]');
+  } else {
+    message = fallback;
+  }
+
+  if (status === 401) {
+    return { status: 500, message: 'OpenAI rejected the configured API key. Verify OPENAI_API_KEY on the server.' };
+  }
+  if (status === 429) {
+    return { status: 429, message: 'OpenAI rate limit hit. Please wait and retry.' };
+  }
+
+  return { status: status || 502, message };
+};
+
 const LLM_CACHE_TTL_MS = Number(process.env.LLM_CACHE_TTL_MS || 1000 * 60 * 5);
 const LLM_CACHE_MAX_ENTRIES = Number(process.env.LLM_CACHE_MAX_ENTRIES || 50);
 const PRICE_CACHE_TTL_MS = Number(process.env.PRICE_CACHE_TTL_MS || 1000 * 60 * 2);
@@ -971,11 +1000,12 @@ app.post('/api/invoke-llm', requireAuth, async (req, res) => {
     return finalizeResponse(entry, false);
   } catch (error) {
     if (error?.raw) {
+      llmInFlight.delete(cacheKey);
       return res.status(502).json({ error: error.message, raw: error.raw });
     }
-    console.error('[server] invoke-llm error', error);
-    const message = error?.response?.data ?? error.message ?? 'Unexpected error';
-    return res.status(502).json({ error: message });
+    const sanitised = sanitizeOpenAIError(error, 'Unexpected error');
+    console.error('[server] invoke-llm error', sanitised.message, error);
+    return res.status(sanitised.status).json({ error: sanitised.message });
   } finally {
     llmInFlight.delete(cacheKey);
   }
@@ -1140,11 +1170,12 @@ app.post('/api/extract', requireAuth, async (req, res) => {
     }
     return sendSuccess(value);
   } catch (error) {
-    console.error('[server] extract error', error);
     if (error?.raw) {
       return res.status(502).json({ error: error.message, raw: error.raw });
     }
-    return res.status(502).json({ error: error.message || 'Extraction failed.' });
+    const sanitised = sanitizeOpenAIError(error, 'Extraction failed.');
+    console.error('[server] extract error', sanitised.message, error);
+    return res.status(sanitised.status).json({ error: sanitised.message });
   }
 });
 
