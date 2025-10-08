@@ -1,4 +1,4 @@
-﻿import React, { useState } from 'react';
+﻿import React, { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAuth } from '@/context/AuthContext.jsx';
 import { createPageUrl } from '@/utils';
@@ -34,7 +34,34 @@ export default function Login() {
   const [formError, setFormError] = useState(null);
   const [autoRegisterPrompt, setAutoRegisterPrompt] = useState(false);
   const navigate = useNavigate();
-  const { login, register, providers, loading } = useAuth();
+  const { login, register, providers, loading, error: authError } = useAuth();
+
+  useEffect(() => {
+    if (!authError) {
+      return;
+    }
+
+    let message = authError?.message || 'Authentication failed. Please try again.';
+    const detailMessage = Array.isArray(authError?.details)
+      ? authError.details.find((item) => item?.message)?.message
+      : null;
+
+    if (!message && detailMessage) {
+      message = detailMessage;
+    }
+
+    if (authError?.status === 404 || authError?.code === 'ACCOUNT_NOT_FOUND') {
+      message = "We couldn't find an account with that email. Let's create one!";
+    } else if (authError?.status === 401 || authError?.code === 'INVALID_CREDENTIALS') {
+      message = 'Incorrect password. Please try again.';
+    } else if (authError?.status === 403 || authError?.code === 'PASSWORD_LOGIN_UNAVAILABLE') {
+      message = 'This account was created with Google Sign-In. Please use the Google option to continue.';
+    } else if (authError?.status === 409 || authError?.code === 'ACCOUNT_EXISTS') {
+      message = 'An account with this email already exists. Try signing in instead.';
+    }
+
+    setFormError(message);
+  }, [authError]);
 
   const handleInputChange = (event) => {
     const { name, value } = event.target;
