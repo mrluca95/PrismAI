@@ -66,6 +66,9 @@ export default function Login() {
   const handleInputChange = (event) => {
     const { name, value } = event.target;
     setForm((prev) => ({ ...prev, [name]: value }));
+    if (formError) {
+      setFormError(null);
+    }
   };
 
   const switchMode = () => {

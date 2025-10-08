@@ -21,6 +21,7 @@ const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 5 *
 const PORT = process.env.PORT || 4000;
 const MODEL = process.env.OPENAI_MODEL || 'gpt-4o-mini';
 const DEFAULT_SYSTEM_PROMPT = process.env.OPENAI_SYSTEM_PROMPT || 'You are Prism AI, an investment copilot. Provide concise, well-structured answers, and never fabricate data you cannot verify.';
+const OPENAI_MAX_OUTPUT_TOKENS = Number.isNaN(Number.parseInt(process.env.OPENAI_MAX_OUTPUT_TOKENS, 10)) ? 600 : Number.parseInt(process.env.OPENAI_MAX_OUTPUT_TOKENS, 10);
 
 const PgSession = connectPgSimple(session);
 
@@ -925,7 +926,11 @@ app.post('/api/invoke-llm', requireAuth, async (req, res) => {
     const response = await openaiClient.chat.completions.create({
       model: MODEL,
       messages: buildMessages(prompt, system_instruction, add_context_from_internet),
-      temperature: 0.3,
+      temperature: 0.2,
+      top_p: 0.8,
+      presence_penalty: 0,
+      frequency_penalty: 0,
+      max_output_tokens: OPENAI_MAX_OUTPUT_TOKENS,
       response_format: schema
         ? {
             type: 'json_schema',
@@ -1053,6 +1058,10 @@ app.post('/api/extract', requireAuth, async (req, res) => {
       const response = await openaiClient.chat.completions.create({
         model: MODEL,
         temperature: 0.1,
+        top_p: 0.6,
+        presence_penalty: 0,
+        frequency_penalty: 0,
+        max_output_tokens: Math.min(OPENAI_MAX_OUTPUT_TOKENS, 500),
         response_format: {
           type: 'json_schema',
           json_schema: {
@@ -1102,6 +1111,10 @@ app.post('/api/extract', requireAuth, async (req, res) => {
     const response = await openaiClient.chat.completions.create({
       model: MODEL,
       temperature: 0.1,
+      top_p: 0.6,
+      presence_penalty: 0,
+      frequency_penalty: 0,
+      max_output_tokens: Math.min(OPENAI_MAX_OUTPUT_TOKENS, 500),
       response_format: {
         type: 'json_schema',
         json_schema: {

@@ -167,8 +167,13 @@ export default function ImagePortfolioImport({ onSuccess }) {
     }
   };
 
-  const handleBrokerChange = (e) => {
-    setBrokerName(e.target.value);
+  const handleBrokerChange = (valueOrEvent) => {
+    if (typeof valueOrEvent === 'string') {
+      setBrokerName(valueOrEvent);
+      return;
+    }
+    const nextValue = valueOrEvent?.target?.value ?? '';
+    setBrokerName(nextValue);
   };
 
   if (isProcessing) {

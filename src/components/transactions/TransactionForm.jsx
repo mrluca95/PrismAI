@@ -174,7 +174,35 @@ export default function TransactionForm({ assets, onSuccess, onCancel }) {
         }
       } catch (err) {
         console.error('Failed to fetch asset details:', err);
-        setPriceError(err.message || 'Could not fetch price data. Please check symbol/date.');
+        let fallbackApplied = false;
+        try {
+          const fallbackQuotes = await FetchQuotes([symbol]);
+          const quoteEntry = fallbackQuotes?.[symbol];
+          const fallbackPrice = Number(quoteEntry?.price ?? quoteEntry?.value?.price);
+          if (Number.isFinite(fallbackPrice)) {
+            const directoryMeta = symbolDirectory[symbol] || {};
+            const resolvedName = existingAsset?.name || directoryMeta.name || symbol;
+            const resolvedType = existingAsset?.type || directoryMeta.type || 'stock';
+
+            setFetchedAssetInfo({
+              historical_price: fallbackPrice,
+              historical_price_date: date || null,
+              historical_price_timestamp: null,
+              current_price: fallbackPrice,
+              current_price_timestamp: quoteEntry?.timestamp || null,
+              name: resolvedName,
+              type: resolvedType,
+            });
+            fallbackApplied = true;
+            setPriceError('');
+          }
+        } catch (fallbackError) {
+          console.warn('[TransactionForm] fallback quote lookup failed', fallbackError);
+        }
+
+        if (!fallbackApplied) {
+          setPriceError(err.message || 'Could not fetch price data. Please check symbol/date.');
+        }
       } finally {
         setIsFetchingPrice(false);
       }
