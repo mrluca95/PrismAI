@@ -352,6 +352,36 @@ const buildLlmCacheKey = ({ prompt, schema, system_instruction, add_context_from
     add_context_from_internet: Boolean(add_context_from_internet),
   });
 
+const extractJsonFromResponse = (response) => {
+  const message = response?.choices?.[0]?.message;
+  const content = message?.content;
+  if (Array.isArray(content)) {
+    for (const part of content) {
+      if (part && typeof part === 'object') {
+        if (part.output && typeof part.output === 'object') {
+          return part.output;
+        }
+        if (part.json && typeof part.json === 'object') {
+          return part.json;
+        }
+        if (part.parsed && typeof part.parsed === 'object') {
+          return part.parsed;
+        }
+        if (part.type === 'output_json_schema' && typeof part.output === 'object') {
+          return part.output;
+        }
+        if (part.type === 'json_schema' && typeof part.data === 'object') {
+          return part.data;
+        }
+      }
+    }
+  }
+  if (content && typeof content === 'object' && content.output && typeof content.output === 'object') {
+    return content.output;
+  }
+  return null;
+};
+
 const extractTextFromResponse = (response) => {
   if (!response) {
     return '';
@@ -1021,18 +1051,25 @@ app.post('/api/invoke-llm', requireAuth, async (req, res) => {
         : undefined,
     });
 
-    const content = extractTextFromResponse(response);
-    let value = content.trim();
-
+    let value;
     if (schema) {
-      try {
-        value = JSON.parse(content);
-      } catch (parseError) {
-        console.error('[server] Failed to parse JSON response from OpenAI', parseError);
-        const error = new Error('Model returned invalid JSON');
-        error.raw = content;
-        throw error;
+      const structured = extractJsonFromResponse(response);
+      if (structured) {
+        value = structured;
+      } else {
+        const content = extractTextFromResponse(response);
+        try {
+          value = JSON.parse(content);
+        } catch (parseError) {
+          console.error('[server] Failed to parse JSON response from OpenAI', parseError);
+          const error = new Error('Model returned invalid JSON');
+          error.raw = content;
+          throw error;
+        }
       }
+    } else {
+      const content = extractTextFromResponse(response);
+      value = content.trim();
     }
 
     const entry = { value, timestamp: nowMs() };
@@ -1164,17 +1201,20 @@ app.post('/api/extract', requireAuth, async (req, res) => {
         ],
       });
 
-      const content = extractTextFromResponse(response);
-      let value = content.trim();
-      try {
-        value = JSON.parse(content);
-      } catch (parseError) {
-        console.error('[server] Failed to parse JSON response from OpenAI', parseError);
-        const error = new Error('Model returned invalid JSON');
-        error.raw = content;
-        throw error;
+      const structured = extractJsonFromResponse(response);
+      if (!structured) {
+        const content = extractTextFromResponse(response);
+        try {
+          const parsed = JSON.parse(content);
+          return sendSuccess(parsed);
+        } catch (parseError) {
+          console.error('[server] Failed to parse JSON response from OpenAI', parseError);
+          const error = new Error('Model returned invalid JSON');
+          error.raw = content;
+          throw error;
+        }
       }
-      return sendSuccess(value);
+      return sendSuccess(structured);
     }
 
     const text = record.buffer.toString('utf8');
@@ -1208,17 +1248,20 @@ app.post('/api/extract', requireAuth, async (req, res) => {
       ],
     });
 
-    const content = extractTextFromResponse(response);
-    let value = content.trim();
-    try {
-      value = JSON.parse(content);
-    } catch (parseError) {
-      console.error('[server] Failed to parse JSON response from OpenAI', parseError);
-      const error = new Error('Model returned invalid JSON');
-      error.raw = content;
-      throw error;
+    const structured = extractJsonFromResponse(response);
+    if (!structured) {
+      const content = extractTextFromResponse(response);
+      try {
+        const parsed = JSON.parse(content);
+        return sendSuccess(parsed);
+      } catch (parseError) {
+        console.error('[server] Failed to parse JSON response from OpenAI', parseError);
+        const error = new Error('Model returned invalid JSON');
+        error.raw = content;
+        throw error;
+      }
     }
-    return sendSuccess(value);
+    return sendSuccess(structured);
   } catch (error) {
     if (error?.raw) {
       return res.status(502).json({ error: error.message, raw: error.raw });
