@@ -317,8 +317,6 @@ export default function TransactionForm({ assets, onSuccess, onCancel }) {
       if (Number.isNaN(purchaseDateTime.getTime())) {
         throw new Error('Invalid purchase date/time.');
       }
-      const historicalPrice = Number.isFinite(historicalPrice) ? historicalPrice : parsedManualPrice;
-      const currentPrice = Number.isFinite(currentPrice) ? currentPrice : historicalPrice;
       const historicalPrice = effectiveHistoricalPrice;
       const currentPrice = Number.isFinite(effectiveCurrentPrice) ? effectiveCurrentPrice : effectiveHistoricalPrice;
       const symbol = formData.asset_symbol.toUpperCase();
