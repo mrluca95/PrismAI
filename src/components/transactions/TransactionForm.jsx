@@ -8,12 +8,27 @@ import { debounce } from 'lodash';
 import AutocompleteInput from '../ui/AutocompleteInput';
 import { useCurrency } from '@/context/CurrencyContext.jsx';
 
+const getLogoUrl = (symbol) => {
+  if (!symbol) {
+    return null;
+  }
+  const upper = String(symbol).toUpperCase();
+  return `https://storage.googleapis.com/iex/api/logos/${upper}.png`;
+};
+
 // Popular stock symbols for autocompletion
 const POPULAR_SYMBOLS = [
   'AAPL', 'GOOGL', 'MSFT', 'AMZN', 'TSLA', 'META', 'NVDA', 'NFLX', 'BTC', 'ETH',
   'SPY', 'QQQ', 'VOO', 'VTI', 'BND', 'GLD', 'SLV', 'COIN', 'AMD', 'INTC',
   'JPM', 'BAC', 'WMT', 'PG', 'JNJ', 'KO', 'PEP', 'DIS', 'V', 'MA'
 ];
+
+const POPULAR_SUGGESTIONS = POPULAR_SYMBOLS.map((symbol) => ({
+  value: symbol,
+  label: symbol,
+  name: symbol,
+  logo: getLogoUrl(symbol),
+}));
 
 export default function TransactionForm({ assets, onSuccess, onCancel }) {
   const { format } = useCurrency();
@@ -38,10 +53,11 @@ export default function TransactionForm({ assets, onSuccess, onCancel }) {
   const [error, setError] = useState('');
   const [isFetchingPrice, setIsFetchingPrice] = useState(false);
   const [priceError, setPriceError] = useState('');
-  const [symbolSuggestions, setSymbolSuggestions] = useState(POPULAR_SYMBOLS.map((symbol) => ({ value: symbol, label: symbol })));
+  const [symbolSuggestions, setSymbolSuggestions] = useState(POPULAR_SUGGESTIONS);
   const [showSuggestions, setShowSuggestions] = useState(false);
   const [symbolDirectory, setSymbolDirectory] = useState(() => Object.create(null));
-  const popularSuggestions = useMemo(() => POPULAR_SYMBOLS.map((symbol) => ({ value: symbol, label: symbol })), []);
+  const [logoErrored, setLogoErrored] = useState(false);
+  const popularSuggestions = useMemo(() => POPULAR_SUGGESTIONS, []);
   const fetchSymbolSuggestions = useMemo(() => debounce(async (rawQuery) => {
     const query = String(rawQuery || '').trim();
     if (!query) {
@@ -53,18 +69,42 @@ export default function TransactionForm({ assets, onSuccess, onCancel }) {
     try {
       const result = await SearchSymbols(query);
       const quotes = Array.isArray(result?.symbols) ? result.symbols : [];
-      const matches = quotes
-        .map((item) => {
-          const symbolValue = String(item?.symbol || '').toUpperCase();
-          if (!symbolValue) {
-            return null;
-          }
-          const label = item?.name ? `${symbolValue} — ${item.name}` : symbolValue;
-          return { value: symbolValue, label };
-        })
-        .filter(Boolean)
-        .slice(0, 20);
-
+      const normalisedQuery = query.toUpperCase();
+      const scoreQuote = (item) => {
+        const symbolValue = String(item?.symbol || '').toUpperCase();
+        let score = 0;
+        if (symbolValue === normalisedQuery) {
+          score += 20;
+        } else if (symbolValue.startsWith(normalisedQuery)) {
+          score += 10;
+        }
+        const quoteType = String(item?.type || item?.quoteType || '').toLowerCase();
+        if (quoteType.includes('equity') || quoteType.includes('stock')) {
+          score += 5;
+        }
+        const exchangeDisplay = String(item?.exchDisp || '').toUpperCase();
+        if (exchangeDisplay.includes('NASDAQ') || exchangeDisplay.includes('NYSE')) {
+          score += 2;
+        }
+        return score;
+      };
+      const sortedQuotes = [...quotes].sort((a, b) => scoreQuote(b) - scoreQuote(a));
+      const unique = new Map();
+      sortedQuotes.forEach((item) => {
+        const symbolValue = String(item?.symbol || '').toUpperCase();
+        if (!symbolValue || unique.has(symbolValue)) {
+          return;
+        }
+        const companyName = item?.name || '';
+        const label = companyName ? `${symbolValue} · ${companyName}` : symbolValue;
+        unique.set(symbolValue, {
+          value: symbolValue,
+          label,
+          name: companyName,
+          logo: getLogoUrl(symbolValue),
+        });
+      });
+      const matches = Array.from(unique.values()).slice(0, 20);
       if (matches.length > 0) {
         setSymbolSuggestions(matches);
         setShowSuggestions(true);
@@ -79,6 +119,7 @@ export default function TransactionForm({ assets, onSuccess, onCancel }) {
               name: item?.name || next[symbolValue]?.name || '',
               type: item?.type || next[symbolValue]?.type || 'stock',
               exchange: item?.exchange || next[symbolValue]?.exchange || '',
+              logo: getLogoUrl(symbolValue),
             };
           });
           return next;
@@ -114,6 +155,10 @@ export default function TransactionForm({ assets, onSuccess, onCancel }) {
   const handleBrokerChange = (value) => {
     setFormData((prev) => ({ ...prev, broker: value }));
   };
+
+  useEffect(() => {
+    setLogoErrored(false);
+  }, [formData.asset_symbol]);
 
   useEffect(() => {
     return () => {
@@ -360,24 +405,47 @@ export default function TransactionForm({ assets, onSuccess, onCancel }) {
             onFocus={() => formData.asset_symbol && setShowSuggestions(symbolSuggestions.length > 0)}
             onBlur={() => setTimeout(() => setShowSuggestions(false), 200)}
             placeholder="e.g., AAPL, BTC"
-            className="w-full neomorph-inset rounded-xl px-4 py-3 text-purple-900 bg-transparent uppercase pr-10"
+            className={`w-full neomorph-inset rounded-xl text-purple-900 bg-transparent uppercase pr-10 py-3 ${formData.asset_symbol && !logoErrored ? 'pl-12' : 'pl-4'}`}
             autoComplete="off"
             required
           />
+          {formData.asset_symbol && !logoErrored && (
+            <img
+              src={getLogoUrl(formData.asset_symbol)}
+              alt={`${formData.asset_symbol} logo`}
+              className="absolute left-3 top-1/2 -translate-y-1/2 w-6 h-6 rounded-full object-contain bg-white shadow-sm"
+              onError={() => setLogoErrored(true)}
+            />
+          )}
           <Search className="absolute right-3 top-3 w-5 h-5 text-purple-500" />
         </div>
         
         {/* Suggestions dropdown */}
         {showSuggestions && symbolSuggestions.length > 0 && (
-          <div className="absolute z-10 w-full mt-1 neomorph rounded-xl bg-purple-100 max-h-48 overflow-y-auto">
+          <div className="absolute z-10 w-full mt-1 neomorph rounded-xl bg-purple-100 max-h-60 overflow-y-auto">
             {symbolSuggestions.map((option) => (
               <button
                 key={option.value}
                 type="button"
                 onClick={() => handleSymbolSelect(option)}
-                className="w-full px-4 py-2 text-left text-purple-800 hover:bg-purple-200 first:rounded-t-xl last:rounded-b-xl transition-colors"
+                className="w-full px-4 py-2 text-left text-purple-800 hover:bg-purple-200 first:rounded-t-xl last:rounded-b-xl transition-colors border-b border-purple-100 last:border-b-0"
               >
-                {option.label}
+                <div className="flex items-center gap-3">
+                  {option.logo && (
+                    <img
+                      src={option.logo}
+                      alt={`${option.value} logo`}
+                      className="w-6 h-6 rounded-full object-contain bg-white shadow-sm"
+                      onError={(event) => { event.currentTarget.style.display = 'none'; }}
+                    />
+                  )}
+                  <div className="flex flex-col">
+                    <span className="font-semibold text-purple-900">{option.value}</span>
+                    {option.label && option.label !== option.value && (
+                      <span className="text-xs text-purple-600">{option.label.replace(`${option.value} · `, '')}</span>
+                    )}
+                  </div>
+                </div>
               </button>
             ))}
           </div>

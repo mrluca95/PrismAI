@@ -486,6 +486,43 @@ const fetchPriceFromAlphaVantage = async (symbol, apiKey) => {
   };
 };
 
+const buildStooqQuoteEntry = async (symbol) => {
+  try {
+    const stooqData = await fetchDailySeriesFromStooq(symbol);
+    const series = stooqData?.series || [];
+    if (series.length === 0) {
+      return null;
+    }
+    const sorted = [...series]
+      .map((entry) => ({ ...entry, dateObj: new Date(entry.date) }))
+      .filter((entry) => !Number.isNaN(entry.dateObj?.getTime()))
+      .sort((a, b) => b.dateObj - a.dateObj);
+    const latest = sorted[0];
+    if (!latest) {
+      return null;
+    }
+    const price = Number(latest.close);
+    if (!Number.isFinite(price)) {
+      return null;
+    }
+    const timestampGuess = latest.dateObj ? new Date(latest.dateObj) : new Date();
+    timestampGuess.setHours(20, 0, 0, 0);
+    return {
+      value: {
+        price,
+        previousClose: null,
+        currency: null,
+        exchange: 'stooq',
+        timestamp: timestampGuess.toISOString(),
+      },
+      timestamp: nowMs(),
+    };
+  } catch (error) {
+    console.warn(`[prices] stooq quote fallback failed for ${symbol}`, error);
+    return null;
+  }
+};
+
 const resolvePriceQuote = async (symbol, apiKey) => {
   const cached = priceCache.get(symbol);
   if (isCacheEntryFresh(cached, PRICE_CACHE_TTL_MS)) {
@@ -498,7 +535,20 @@ const resolvePriceQuote = async (symbol, apiKey) => {
   }
 
   const request = (async () => {
-    const entry = await fetchPriceFromAlphaVantage(symbol, apiKey);
+    let entry = null;
+    try {
+      entry = await fetchPriceFromAlphaVantage(symbol, apiKey);
+    } catch (error) {
+      console.warn(`[prices] primary quote provider unavailable for ${symbol}`, error);
+    }
+
+    if (!entry || !Number.isFinite(entry?.value?.price)) {
+      const fallbackEntry = await buildStooqQuoteEntry(symbol);
+      if (fallbackEntry) {
+        entry = fallbackEntry;
+      }
+    }
+
     if (entry && PRICE_CACHE_TTL_MS > 0) {
       priceCache.set(symbol, entry);
       pruneCache(priceCache, PRICE_CACHE_MAX_ENTRIES);
