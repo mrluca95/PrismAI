@@ -159,6 +159,12 @@ export default function TransactionForm({ assets, onSuccess, onCancel }) {
       return;
     }
 
+    if (name === 'manual_price') {
+      setFormData((prev) => ({ ...prev, manual_price: value }));
+      setPriceError('');
+      return;
+    }
+
     setFormData((prev) => ({ ...prev, [name]: value }));
   };
 
@@ -321,7 +327,10 @@ export default function TransactionForm({ assets, onSuccess, onCancel }) {
     setIsSubmitting(true);
     
     try {
-      const transactionQuantity = parseFloat(formData.quantity);
+      const transactionQuantity = Number.parseFloat(formData.quantity);
+      if (!Number.isFinite(transactionQuantity) || transactionQuantity <= 0) {
+        throw new Error('Quantity must be a positive number.');
+      }
       const purchaseDateTime = new Date(`${formData.date}T${(formData.time || '00:00').padStart(5, '0')}:00`);
       if (Number.isNaN(purchaseDateTime.getTime())) {
         throw new Error('Invalid purchase date/time.');

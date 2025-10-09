@@ -401,6 +401,14 @@ const tryParseLooseJson = (raw) => {
   if (direct) {
     return direct;
   }
+  const fenceMatch = trimmed.match(/```(?:json)?\s*([\s\S]+?)```/i);
+  if (fenceMatch) {
+    const candidate = fenceMatch[1];
+    const parsed = parseCandidate(candidate.trim());
+    if (parsed) {
+      return parsed;
+    }
+  }
   const firstBrace = trimmed.indexOf('{');
   const lastBrace = trimmed.lastIndexOf('}');
   if (firstBrace !== -1 && lastBrace !== -1 && lastBrace > firstBrace) {
@@ -543,8 +551,10 @@ const fetchPriceFromAlphaVantage = async (symbol, apiKey) => {
   const timestamp = tradingDay
     ? new Date(`${tradingDay}T16:00:00Z`).toISOString()
     : new Date().toISOString();
+  const meta = KNOWN_SYMBOL_META.get(symbol) || null;
 
   return {
+    source: 'alpha_vantage',
     value: {
       price,
       previousClose: Number.isFinite(previousClose) ? previousClose : null,
@@ -552,6 +562,7 @@ const fetchPriceFromAlphaVantage = async (symbol, apiKey) => {
       exchange: null,
       timestamp,
     },
+    meta,
     timestamp: nowMs(),
   };
 };
@@ -578,6 +589,7 @@ const buildStooqQuoteEntry = async (symbol) => {
     const timestampGuess = latest.dateObj ? new Date(latest.dateObj) : new Date();
     timestampGuess.setHours(20, 0, 0, 0);
     return {
+      source: 'stooq',
       value: {
         price,
         previousClose: null,
@@ -585,12 +597,114 @@ const buildStooqQuoteEntry = async (symbol) => {
         exchange: 'stooq',
         timestamp: timestampGuess.toISOString(),
       },
+      meta: { name: KNOWN_SYMBOL_META.get(symbol)?.name || null, type: 'stock' },
       timestamp: nowMs(),
     };
   } catch (error) {
     console.warn(`[prices] stooq quote fallback failed for ${symbol}`, error);
     return null;
   }
+const mapYahooQuoteType = (quoteType = '') => {
+  const lowered = quoteType.toLowerCase();
+  if (lowered.includes('etf')) return 'etf';
+  if (lowered.includes('mutual')) return 'mutual_fund';
+  if (lowered.includes('bond')) return 'bond';
+  if (lowered.includes('crypto')) return 'crypto';
+  return 'stock';
+};
+
+const fetchYahooQuote = async (symbol) => {
+  try {
+    const url = `https://query1.finance.yahoo.com/v7/finance/quote?symbols=${encodeURIComponent(symbol)}`;
+    const response = await fetch(url);
+    if (!response.ok) {
+      throw new Error(`Yahoo quote responded with ${response.status}`);
+    }
+    const json = await response.json();
+    const quote = json?.quoteResponse?.result?.[0];
+    if (!quote) {
+      return null;
+    }
+    const price = Number(quote?.regularMarketPrice ?? quote?.postMarketPrice ?? quote?.preMarketPrice ?? null);
+    if (!Number.isFinite(price)) {
+      return null;
+    }
+    const timestamp = quote?.regularMarketTime ? new Date(quote.regularMarketTime * 1000).toISOString() : null;
+    const previousClose = Number(quote?.regularMarketPreviousClose ?? quote?.previousClose ?? null);
+    const name = quote?.longName || quote?.shortName || null;
+    const type = mapYahooQuoteType(quote?.quoteType || '');
+    const exchange = quote?.fullExchangeName || quote?.exchange || null;
+    const currency = quote?.currency || null;
+    return {
+      source: 'yahoo',
+      value: {
+        price,
+        previousClose: Number.isFinite(previousClose) ? previousClose : null,
+        currency,
+        exchange,
+        timestamp,
+      },
+      meta: { name, type },
+      timestamp: nowMs(),
+    };
+  } catch (error) {
+    console.warn(`[prices] yahoo quote failed for ${symbol}`, error);
+    return null;
+  }
+};
+
+const resolveYahooHistoricalPrice = async (symbol, targetDateTime) => {
+  try {
+    const target = targetDateTime ? new Date(targetDateTime) : new Date();
+    const now = Date.now();
+    const diffMs = Math.abs(now - target.getTime());
+    const thirtyDaysMs = 1000 * 60 * 60 * 24 * 30;
+    const interval = diffMs < thirtyDaysMs ? '1h' : '1d';
+    const windowMs = interval === '1h' ? 1000 * 60 * 60 * 24 * 3 : 1000 * 60 * 60 * 24 * 10;
+    const start = Math.max(0, Math.floor((target.getTime() - windowMs) / 1000));
+    const end = Math.floor((target.getTime() + windowMs) / 1000);
+    const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbol)}?period1=${start}&period2=${end}&interval=${interval}&includePrePost=false&events=div%2Csplit`;
+    const response = await fetch(url);
+    if (!response.ok) {
+      throw new Error(`Yahoo chart responded with ${response.status}`);
+    }
+    const json = await response.json();
+    const result = json?.chart?.result?.[0];
+    const timestamps = result?.timestamp || [];
+    const quotes = result?.indicators?.quote?.[0]?.close || [];
+    if (!Array.isArray(timestamps) || !Array.isArray(quotes) || timestamps.length === 0) {
+      return null;
+    }
+    const targetMs = target.getTime();
+    let chosenPrice = null;
+    let chosenTimestamp = null;
+    for (let i = timestamps.length - 1; i >= 0; i -= 1) {
+      const tsMs = timestamps[i] * 1000;
+      const close = Number(quotes[i]);
+      if (!Number.isFinite(close)) {
+        continue;
+      }
+      chosenPrice = close;
+      chosenTimestamp = tsMs;
+      if (tsMs <= targetMs) {
+        break;
+      }
+    }
+    if (!Number.isFinite(chosenPrice)) {
+      return null;
+    }
+    const ts = new Date(chosenTimestamp);
+    return {
+      price: chosenPrice,
+      date: ts.toISOString().slice(0, 10),
+      timestamp: ts.toISOString(),
+    };
+  } catch (error) {
+    console.warn(`[prices] yahoo historical fallback failed for ${symbol}`, error);
+    return null;
+  }
+};
+
 };
 
 const resolvePriceQuote = async (symbol, apiKey) => {
@@ -613,9 +727,16 @@ const resolvePriceQuote = async (symbol, apiKey) => {
     }
 
     if (!entry || !Number.isFinite(entry?.value?.price)) {
-      const fallbackEntry = await buildStooqQuoteEntry(symbol);
-      if (fallbackEntry) {
-        entry = fallbackEntry;
+      const stooqEntry = await buildStooqQuoteEntry(symbol);
+      if (stooqEntry) {
+        entry = stooqEntry;
+      }
+    }
+
+    if (!entry || !Number.isFinite(entry?.value?.price)) {
+      const yahooEntry = await fetchYahooQuote(symbol);
+      if (yahooEntry) {
+        entry = yahooEntry;
       }
     }
 
@@ -1321,6 +1442,8 @@ app.post('/api/prices/details', requireAuth, async (req, res) => {
 
   const normalizedSymbol = normalizeSymbol(symbol);
   const metadata = KNOWN_SYMBOL_META.get(normalizedSymbol) || null;
+  let resolvedName = metadata?.name || null;
+  let resolvedType = metadata?.type || null;
 
   const apiKey = process.env.ALPHA_VANTAGE_API_KEY;
   if (!apiKey) {
@@ -1369,7 +1492,13 @@ app.post('/api/prices/details', requireAuth, async (req, res) => {
     const now = new Date();
     let currentPrice = Number(quoteEntry?.value?.price);
     let currentPriceTimestamp = quoteEntry?.value?.timestamp || null;
-    let priceSource = quoteEntry?.value ? 'alpha_vantage' : null;
+    let priceSource = quoteEntry?.source || (quoteEntry?.value ? 'alpha_vantage' : null);
+    if (quoteEntry?.meta?.name && !resolvedName) {
+      resolvedName = quoteEntry.meta.name;
+    }
+    if (quoteEntry?.meta?.type && !resolvedType) {
+      resolvedType = quoteEntry.meta.type;
+    }
 
     let stooqSeries;
     let stooqSeriesLoaded = false;
@@ -1405,6 +1534,21 @@ app.post('/api/prices/details', requireAuth, async (req, res) => {
         }
       } catch (fallbackError) {
         console.warn(`[prices] fallback current price failed for ${normalizedSymbol}`, fallbackError);
+      }
+    }
+
+    if (!Number.isFinite(currentPrice)) {
+      const yahooQuote = await fetchYahooQuote(normalizedSymbol);
+      if (yahooQuote?.value) {
+        currentPrice = Number(yahooQuote.value.price);
+        currentPriceTimestamp = yahooQuote.value.timestamp || currentPriceTimestamp;
+        priceSource = yahooQuote.source || 'yahoo';
+        if (yahooQuote.meta?.name && !resolvedName) {
+          resolvedName = yahooQuote.meta.name;
+        }
+        if (yahooQuote.meta?.type && !resolvedType) {
+          resolvedType = yahooQuote.meta.type;
+        }
       }
     }
 
@@ -1482,6 +1626,15 @@ app.post('/api/prices/details', requireAuth, async (req, res) => {
           console.warn(`[prices] stooq historical fallback failed for ${normalizedSymbol}`, stooqError);
         }
       }
+
+      if (!Number.isFinite(historicalPrice)) {
+        const yahooHistorical = await resolveYahooHistoricalPrice(normalizedSymbol, targetDateTime || targetDate || now);
+        if (yahooHistorical) {
+          historicalPrice = yahooHistorical.price;
+          historicalPriceDate = yahooHistorical.date;
+          historicalPriceTimestamp = yahooHistorical.timestamp;
+        }
+      }
     }
 
     if (!Number.isFinite(historicalPrice)) {
@@ -1492,17 +1645,21 @@ app.post('/api/prices/details', requireAuth, async (req, res) => {
 
     await consumeUsage(req.user, { quoteRequests: 1 });
 
+    const responseMetadata = resolvedName || resolvedType
+      ? { ...(metadata || {}), name: resolvedName || metadata?.name || null, type: resolvedType || metadata?.type || null }
+      : metadata;
+
     return res.json({
       symbol: normalizedSymbol,
-      name: metadata?.name || normalizedSymbol,
-      type: metadata?.type || null,
+      name: resolvedName || metadata?.name || normalizedSymbol,
+      type: resolvedType || metadata?.type || null,
       current_price: currentPrice,
       current_price_timestamp: currentPriceTimestamp,
       historical_price: historicalPrice,
       historical_price_date: historicalPriceDate,
       historical_price_timestamp: historicalPriceTimestamp,
       provider: priceSource || 'stooq',
-      metadata,
+      metadata: responseMetadata,
     });
   } catch (error) {
     console.error('[server] price details error', error);

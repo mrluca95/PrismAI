@@ -8,7 +8,8 @@
     "build": "vite build",
     "preview": "vite preview",
     "server": "node server/index.js",
-    "postbuild": "node scripts/create-spa-fallback.cjs"
+    "postbuild": "node scripts/create-spa-fallback.cjs",
+    "test:openai": "node scripts/test-openai.mjs"
   },
   "dependencies": {
     "bcryptjs": "^2.4.3",
