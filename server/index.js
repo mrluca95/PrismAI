@@ -21,7 +21,7 @@ const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 5 *
 const PORT = process.env.PORT || 4000;
 const MODEL = process.env.OPENAI_MODEL || 'gpt-4o-mini';
 const DEFAULT_SYSTEM_PROMPT = process.env.OPENAI_SYSTEM_PROMPT || 'You are Prism AI, an investment copilot. Provide concise, well-structured answers, and never fabricate data you cannot verify.';
-const OPENAI_MAX_OUTPUT_TOKENS = Number.isNaN(Number.parseInt(process.env.OPENAI_MAX_OUTPUT_TOKENS, 10)) ? 600 : Number.parseInt(process.env.OPENAI_MAX_OUTPUT_TOKENS, 10);
+const OPENAI_MAX_OUTPUT_TOKENS = Number.isNaN(Number.parseInt(process.env.OPENAI_MAX_OUTPUT_TOKENS, 10)) ? 1500 : Number.parseInt(process.env.OPENAI_MAX_OUTPUT_TOKENS, 10);
 
 const PgSession = connectPgSimple(session);
 

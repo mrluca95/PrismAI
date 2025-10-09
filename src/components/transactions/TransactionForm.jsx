@@ -140,6 +140,15 @@ export default function TransactionForm({ assets, onSuccess, onCancel }) {
 
 
   const uniqueBrokers = [...new Set(assets.map((asset) => asset.broker).filter(Boolean))];
+  const parsedManualPrice = formData.manual_price !== '' ? Number(formData.manual_price) : NaN;
+  const fetchedHistoricalPrice = Number.isFinite(Number(fetchedAssetInfo.historical_price)) ? Number(fetchedAssetInfo.historical_price) : NaN;
+  const fetchedCurrentPrice = Number.isFinite(Number(fetchedAssetInfo.current_price)) ? Number(fetchedAssetInfo.current_price) : NaN;
+  const effectiveHistoricalPrice = Number.isFinite(fetchedHistoricalPrice) ? fetchedHistoricalPrice : parsedManualPrice;
+  const effectiveCurrentPrice = Number.isFinite(fetchedCurrentPrice) ? fetchedCurrentPrice : (Number.isFinite(parsedManualPrice) ? parsedManualPrice : NaN);
+  const hasFetchedPrice = Number.isFinite(fetchedHistoricalPrice) && Number.isFinite(fetchedCurrentPrice);
+  const hasManualPrice = Number.isFinite(parsedManualPrice);
+  const canSubmit = Boolean(formData.asset_symbol && formData.quantity && formData.date && formData.time && formData.broker) && Number.isFinite(effectiveHistoricalPrice);
+
 
   const handleChange = (e) => {
     const { name, value } = e.target;
@@ -403,8 +412,8 @@ export default function TransactionForm({ assets, onSuccess, onCancel }) {
     }
   };
 
-  const gainLossPreview = fetchedAssetInfo.historical_price && fetchedAssetInfo.current_price ? 
-    ((fetchedAssetInfo.current_price - fetchedAssetInfo.historical_price) / fetchedAssetInfo.historical_price) * 100 : 0;
+  const gainLossPreview = Number.isFinite(effectiveHistoricalPrice) && Number.isFinite(effectiveCurrentPrice) && effectiveHistoricalPrice !== 0 ?
+    ((effectiveCurrentPrice - effectiveHistoricalPrice) / effectiveHistoricalPrice) * 100 : 0;
 
   return (
     <form onSubmit={handleSubmit} className="space-y-6">
@@ -559,7 +568,7 @@ export default function TransactionForm({ assets, onSuccess, onCancel }) {
         <button type="button" onClick={onCancel} className="neomorph rounded-xl px-6 py-3 font-semibold text-purple-700 neomorph-hover transition-all">
           Cancel
         </button>
-        <button type="submit" disabled={isSubmitting || isFetchingPrice || !fetchedAssetInfo.historical_price || !fetchedAssetInfo.current_price} className="neomorph rounded-xl px-6 py-3 font-semibold text-purple-800 neomorph-hover transition-all disabled:opacity-50 disabled:cursor-not-allowed">
+        <button type="submit" disabled={isSubmitting || isFetchingPrice || !canSubmit} className="neomorph rounded-xl px-6 py-3 font-semibold text-purple-800 neomorph-hover transition-all disabled:opacity-50 disabled:cursor-not-allowed">
           {isSubmitting ? <Loader2 className="animate-spin w-5 h-5" /> : 'Save Transaction'}
         </button>
       </div>
