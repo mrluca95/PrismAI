@@ -38,7 +38,8 @@ export default function TransactionForm({ assets, onSuccess, onCancel }) {
     quantity: '',
     date: new Date().toISOString().split('T')[0], // YYYY-MM-DD format
     time: new Date().toTimeString().slice(0, 5), // HH:mm in local time
-    broker: '' // Initialize broker to empty for autocompletion
+    broker: '', // Initialize broker to empty for autocompletion
+    manual_price: ''
   });
   const [fetchedAssetInfo, setFetchedAssetInfo] = useState({ 
     historical_price: '', 
@@ -214,6 +215,10 @@ export default function TransactionForm({ assets, onSuccess, onCancel }) {
             name: resolvedName,
             type: resolvedType,
           });
+          setFormData((prev) => ({
+            ...prev,
+            manual_price: Number.isFinite(historical) ? String(historical) : prev.manual_price,
+          }));
         } else {
           throw new Error('Invalid response from price service.');
         }
@@ -238,6 +243,10 @@ export default function TransactionForm({ assets, onSuccess, onCancel }) {
               name: resolvedName,
               type: resolvedType,
             });
+            setFormData((prev) => ({
+              ...prev,
+              manual_price: Number.isFinite(fallbackPrice) ? String(fallbackPrice) : prev.manual_price,
+            }));
             fallbackApplied = true;
             setPriceError('');
           }
@@ -288,8 +297,15 @@ export default function TransactionForm({ assets, onSuccess, onCancel }) {
 
   const handleSubmit = async (e) => {
     e.preventDefault();
-    if (!formData.asset_symbol || !formData.quantity || !fetchedAssetInfo.historical_price || !fetchedAssetInfo.current_price || !formData.date || !formData.time || !formData.broker) {
-      setError('All fields must be filled and asset details must be fetched successfully.');
+    const parsedManualPrice = formData.manual_price !== '' ? Number(formData.manual_price) : NaN;
+    const effectiveHistoricalPrice = Number.isFinite(Number(fetchedAssetInfo.historical_price)) ? Number(fetchedAssetInfo.historical_price) : parsedManualPrice;
+    const effectiveCurrentPrice = Number.isFinite(Number(fetchedAssetInfo.current_price)) ? Number(fetchedAssetInfo.current_price) : effectiveHistoricalPrice;
+    if (!formData.asset_symbol || !formData.quantity || !formData.date || !formData.time || !formData.broker) {
+      setError('All fields must be filled.');
+      return;
+    }
+    if (!Number.isFinite(effectiveHistoricalPrice)) {
+      setError('Enter a valid purchase price manually if automatic lookup fails.');
       return;
     }
     setError('');
@@ -301,8 +317,10 @@ export default function TransactionForm({ assets, onSuccess, onCancel }) {
       if (Number.isNaN(purchaseDateTime.getTime())) {
         throw new Error('Invalid purchase date/time.');
       }
-      const historicalPrice = parseFloat(fetchedAssetInfo.historical_price);
-      const currentPrice = parseFloat(fetchedAssetInfo.current_price);
+      const historicalPrice = Number.isFinite(historicalPrice) ? historicalPrice : parsedManualPrice;
+      const currentPrice = Number.isFinite(currentPrice) ? currentPrice : historicalPrice;
+      const historicalPrice = effectiveHistoricalPrice;
+      const currentPrice = Number.isFinite(effectiveCurrentPrice) ? effectiveCurrentPrice : effectiveHistoricalPrice;
       const symbol = formData.asset_symbol.toUpperCase();
 
       const existingAssets = await Asset.filter({ symbol });
@@ -472,6 +490,19 @@ export default function TransactionForm({ assets, onSuccess, onCancel }) {
             name="broker"
           />
         </div>
+      </div>
+      <div className="mt-3">
+        <label className="text-sm font-medium text-purple-800 mb-2 block">Manual Purchase Price</label>
+        <input
+          type="number"
+          step="any"
+          name="manual_price"
+          value={formData.manual_price}
+          onChange={handleChange}
+          placeholder="Enter a price if automatic retrieval fails"
+          className="w-full neomorph-inset rounded-xl px-4 py-3 text-purple-900 bg-transparent"
+        />
+        <p className="text-xs text-purple-500 mt-1">This value will be used when we cannot fetch prices automatically.</p>
       </div>
 
       <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
