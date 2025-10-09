@@ -1009,7 +1009,7 @@ app.post('/api/invoke-llm', requireAuth, async (req, res) => {
       top_p: 0.8,
       presence_penalty: 0,
       frequency_penalty: 0,
-      max_output_tokens: OPENAI_MAX_OUTPUT_TOKENS,
+      max_tokens: OPENAI_MAX_OUTPUT_TOKENS,
       response_format: schema
         ? {
             type: 'json_schema',
@@ -1141,7 +1141,7 @@ app.post('/api/extract', requireAuth, async (req, res) => {
         top_p: 0.6,
         presence_penalty: 0,
         frequency_penalty: 0,
-        max_output_tokens: Math.min(OPENAI_MAX_OUTPUT_TOKENS, 500),
+        max_tokens: Math.min(OPENAI_MAX_OUTPUT_TOKENS, 500),
         response_format: {
           type: 'json_schema',
           json_schema: {
@@ -1194,7 +1194,7 @@ app.post('/api/extract', requireAuth, async (req, res) => {
       top_p: 0.6,
       presence_penalty: 0,
       frequency_penalty: 0,
-      max_output_tokens: Math.min(OPENAI_MAX_OUTPUT_TOKENS, 500),
+      max_tokens: Math.min(OPENAI_MAX_OUTPUT_TOKENS, 500),
       response_format: {
         type: 'json_schema',
         json_schema: {
