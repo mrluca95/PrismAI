@@ -163,6 +163,15 @@ const priceHistoryInFlight = new Map();
 const priceIntradayCache = new Map();
 const priceIntradayInFlight = new Map();
 
+let hasLoggedMissingAlphaKey = false;
+const warnMissingAlphaKey = () => {
+  if (hasLoggedMissingAlphaKey) {
+    return;
+  }
+  console.warn('[prices] ALPHA_VANTAGE_API_KEY is not configured. Falling back to secondary price providers.');
+  hasLoggedMissingAlphaKey = true;
+};
+
 const SYMBOL_SEARCH_TTL_MS = Number(process.env.SYMBOL_SEARCH_TTL_MS || 1000 * 60 * 10);
 const SYMBOL_SEARCH_MAX_RESULTS = Number(process.env.SYMBOL_SEARCH_MAX_RESULTS || 25);
 const symbolSearchCache = new Map();
@@ -604,6 +613,8 @@ const buildStooqQuoteEntry = async (symbol) => {
     console.warn(`[prices] stooq quote fallback failed for ${symbol}`, error);
     return null;
   }
+};
+
 const mapYahooQuoteType = (quoteType = '') => {
   const lowered = quoteType.toLowerCase();
   if (lowered.includes('etf')) return 'etf';
@@ -705,7 +716,7 @@ const resolveYahooHistoricalPrice = async (symbol, targetDateTime) => {
   }
 };
 
-};
+const isValidQuoteEntry = (entry) => Boolean(entry && Number.isFinite(entry?.value?.price));
 
 const resolvePriceQuote = async (symbol, apiKey) => {
   const cached = priceCache.get(symbol);
@@ -719,24 +730,29 @@ const resolvePriceQuote = async (symbol, apiKey) => {
   }
 
   const request = (async () => {
+    const providers = [
+      { label: 'yahoo quote', exec: () => fetchYahooQuote(symbol) },
+      { label: 'stooq quote fallback', exec: () => buildStooqQuoteEntry(symbol) },
+    ];
+
+    if (apiKey) {
+      providers.push({ label: 'alpha vantage quote', exec: () => fetchPriceFromAlphaVantage(symbol, apiKey) });
+    }
+
     let entry = null;
-    try {
-      entry = await fetchPriceFromAlphaVantage(symbol, apiKey);
-    } catch (error) {
-      console.warn(`[prices] primary quote provider unavailable for ${symbol}`, error);
-    }
-
-    if (!entry || !Number.isFinite(entry?.value?.price)) {
-      const stooqEntry = await buildStooqQuoteEntry(symbol);
-      if (stooqEntry) {
-        entry = stooqEntry;
-      }
-    }
-
-    if (!entry || !Number.isFinite(entry?.value?.price)) {
-      const yahooEntry = await fetchYahooQuote(symbol);
-      if (yahooEntry) {
-        entry = yahooEntry;
+    for (const provider of providers) {
+      try {
+        const candidate = await provider.exec();
+        if (!isValidQuoteEntry(candidate)) {
+          if (candidate && !Number.isFinite(candidate?.value?.price)) {
+            console.warn(`[prices] ${provider.label} returned invalid price for ${symbol}`);
+          }
+          continue;
+        }
+        entry = candidate;
+        break;
+      } catch (error) {
+        console.warn(`[prices] ${provider.label} failed for ${symbol}`, error);
       }
     }
 
@@ -791,6 +807,9 @@ const fetchIntradaySeriesFromAlpha = async (symbol, apiKey) => {
 };
 
 const resolveIntradaySeries = async (symbol, apiKey) => {
+  if (!apiKey) {
+    return null;
+  }
   const cached = priceIntradayCache.get(symbol);
   if (isCacheEntryFresh(cached, PRICE_INTRADAY_TTL_MS)) {
     return cached;
@@ -819,6 +838,9 @@ const resolveIntradaySeries = async (symbol, apiKey) => {
   }
 };
 const fetchDailySeriesFromAlpha = async (symbol, apiKey) => {
+  if (!apiKey) {
+    return null;
+  }
   const url = `https://www.alphavantage.co/query?function=TIME_SERIES_DAILY_ADJUSTED&symbol=${encodeURIComponent(symbol)}&outputsize=compact&apikey=${apiKey}`;
   const response = await fetch(url);
 
@@ -854,6 +876,9 @@ const fetchDailySeriesFromAlpha = async (symbol, apiKey) => {
 };
 
 const resolveHistoricalSeries = async (symbol, apiKey) => {
+  if (!apiKey) {
+    return null;
+  }
   const cached = priceHistoryCache.get(symbol);
   if (isCacheEntryFresh(cached, PRICE_HISTORY_TTL_MS)) {
     return cached;
@@ -1447,7 +1472,7 @@ app.post('/api/prices/details', requireAuth, async (req, res) => {
 
   const apiKey = process.env.ALPHA_VANTAGE_API_KEY;
   if (!apiKey) {
-    return res.status(500).json({ error: 'ALPHA_VANTAGE_API_KEY is not configured on the server.' });
+    warnMissingAlphaKey();
   }
 
   const limits = getTierLimits(req.user.tier);
@@ -1688,7 +1713,7 @@ app.post('/api/prices', requireAuth, async (req, res) => {
 
   const apiKey = process.env.ALPHA_VANTAGE_API_KEY;
   if (!apiKey) {
-    return res.status(500).json({ error: 'ALPHA_VANTAGE_API_KEY is not configured on the server.' });
+    warnMissingAlphaKey();
   }
 
   const limits = getTierLimits(req.user.tier);

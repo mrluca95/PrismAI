@@ -8,7 +8,7 @@ async function main() {
   }
 
   const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
-  const model = process.env.OPENAI_MODEL || 'gpt-4o-mini';
+  const model = process.env.OPENAI_MODEL || 'gpt-4o';
 
   try {
     const response = await client.chat.completions.create({
