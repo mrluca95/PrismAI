@@ -55,6 +55,8 @@ app.use(cors({
 app.use(express.json({ limit: '1mb' }));
 app.use(express.urlencoded({ extended: false }));
 
+const OPENAI_PRICE_MODEL = process.env.OPENAI_PRICE_MODEL || 'gpt-4o-mini';
+
 const sessionOptions = {
   name: 'prism.sid',
   secret: config.session.secret,
@@ -115,6 +117,68 @@ if (process.env.OPENAI_API_KEY) {
 }
 
 const uploadStore = new Map();
+
+const parseJsonSafe = (raw) => {
+  if (!raw || typeof raw !== 'string') {
+    return null;
+  }
+  try {
+    return JSON.parse(raw);
+  } catch (error) {
+    return tryParseLooseJson(raw);
+  }
+};
+
+const fetchPriceFromOpenAI = async (symbol) => {
+  if (!openaiClient || !symbol) {
+    return null;
+  }
+  const normalized = normalizeSymbol(symbol);
+  if (!normalized) {
+    return null;
+  }
+
+  const prompt = `Ticker: ${normalized}\nReturn JSON {"price": number, "currency": "USD"}. Use the latest available market price in USD.`;
+
+  try {
+    const response = await openaiClient.responses.create({
+      model: OPENAI_PRICE_MODEL,
+      input: [
+        {
+          role: 'system',
+          content: 'Respond with compact JSON only. Format: {"price":number,"currency":"USD","timestamp":ISO8601?}.',
+        },
+        { role: 'user', content: prompt },
+      ],
+      max_output_tokens: 60,
+    });
+
+    const text = response?.output_text?.trim();
+    const parsed = parseJsonSafe(text);
+    const price = Number(parsed?.price);
+    if (!Number.isFinite(price) || price <= 0) {
+      return null;
+    }
+    const currency = typeof parsed?.currency === 'string' ? parsed.currency : null;
+    const timestamp = typeof parsed?.timestamp === 'string' ? parsed.timestamp : new Date().toISOString();
+    const source = typeof parsed?.source === 'string' ? parsed.source : 'openai';
+    return {
+      source,
+      value: {
+        price,
+        previousClose: null,
+        currency,
+        exchange: null,
+        timestamp,
+      },
+      meta: { name: null, type: null },
+      timestamp: nowMs(),
+    };
+  } catch (error) {
+    console.warn(`[prices] openai price lookup failed for ${normalized}`, error);
+    return null;
+  }
+};
 
 const sanitizeOpenAIError = (error, fallback = 'AI request failed.') => {
   const status = error?.status ?? error?.response?.status ?? 502;
@@ -914,6 +978,13 @@ const resolvePriceQuote = async (symbol) => {
 
     if (!isValidQuoteEntry(entry)) {
       entry = await buildStooqQuoteEntry(cacheKey);
+    }
+
+    if (!isValidQuoteEntry(entry)) {
+      const openAIEntry = await fetchPriceFromOpenAI(cacheKey);
+      if (openAIEntry) {
+        entry = openAIEntry;
+      }
     }
 
     if (entry && PRICE_CACHE_TTL_MS > 0) {
