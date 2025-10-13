@@ -106,7 +106,7 @@ export async function ExtractDataFromUploadedFile({ file_url: fileUrl, json_sche
   });
 }
 
-export async function FetchPriceDetails({ symbol, date, time }) {
+export async function FetchPriceDetails({ symbol, date, time, preferOpenAI = false }) {
   const normalizedSymbol = String(symbol || '').trim().toUpperCase();
   if (!normalizedSymbol) {
     throw new Error('symbol is required');
@@ -417,3 +417,5 @@ async function fallbackExtractData() {
 
 
 export { requestJson };
+
+

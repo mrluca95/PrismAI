@@ -309,6 +309,7 @@ const buildYahooQuoteEntry = (symbol, yahooSymbol, chartResult) => {
     ? new Date(meta.regularMarketTime * 1000).toISOString()
     : null;
   const previousClose = Number(meta?.chartPreviousClose ?? meta?.previousClose);
+  const open = Number(meta?.regularMarketOpen ?? meta?.chartPreviousClose ?? null);
   const currency = meta?.currency || null;
   const exchange = meta?.fullExchangeName || meta?.exchangeName || null;
   const name = meta?.longName || meta?.shortName || null;
@@ -319,6 +320,7 @@ const buildYahooQuoteEntry = (symbol, yahooSymbol, chartResult) => {
     value: {
       price,
       previousClose: Number.isFinite(previousClose) ? previousClose : null,
+      open: Number.isFinite(open) ? open : null,
       currency,
       exchange,
       timestamp,
@@ -995,8 +997,10 @@ const resolveYahooHistoricalPrice = async (symbol, targetDateTime) => {
 
 const isValidQuoteEntry = (entry) => Boolean(entry && Number.isFinite(entry?.value?.price));
 
-const resolvePriceQuote = async (symbol) => {
+const resolvePriceQuote = async (symbol, options = {}) => {
   const cacheKey = normalizeSymbol(symbol);
+  const { preferOpenAI = false } = options;
+
   const cached = priceCache.get(cacheKey);
   if (isCacheEntryFresh(cached, PRICE_CACHE_TTL_MS)) {
     return cached;
@@ -1022,7 +1026,7 @@ const resolvePriceQuote = async (symbol) => {
       entry = await buildStooqQuoteEntry(cacheKey);
     }
 
-    if (!isValidQuoteEntry(entry)) {
+    if (preferOpenAI && !isValidQuoteEntry(entry)) {
       const openAIEntry = await fetchPriceFromOpenAI(cacheKey);
       if (openAIEntry) {
         entry = openAIEntry;
@@ -1675,7 +1679,7 @@ app.post('/api/prices/details', requireAuth, async (req, res) => {
     return res.status(400).json({ error: 'symbol is required' });
   }
 
-  const normalizedSymbol = normalizeSymbol(symbol);
+  const preferOpenAI = Boolean(prefer_openai);\n  const normalizedSymbol = normalizeSymbol(symbol);
   const metadata = KNOWN_SYMBOL_META.get(normalizedSymbol) || null;
   let resolvedName = metadata?.name || null;
   let resolvedType = metadata?.type || null;
@@ -1710,7 +1714,7 @@ app.post('/api/prices/details', requireAuth, async (req, res) => {
   try {
     let quoteEntry = null;
     try {
-      quoteEntry = await resolvePriceQuote(normalizedSymbol);
+      quoteEntry = await resolvePriceQuote(normalizedSymbol, { preferOpenAI });
     } catch (quoteError) {
       if (quoteError?.isRateLimit || quoteError?.status) {
         console.warn(`[prices] primary quote provider unavailable for ${normalizedSymbol}`, quoteError);
@@ -1759,12 +1763,24 @@ app.post('/api/prices/details', requireAuth, async (req, res) => {
             const timestampGuess = new Date(latest.dateObj);
             timestampGuess.setHours(20, 0, 0, 0);
             currentPriceTimestamp = timestampGuess.toISOString();
+            currentOpen = null;
+            previousClose = Number(latest.close);
+            if (!Number.isFinite(previousClose)) {
+              previousClose = null;
+            }
             priceSource = 'stooq';
           }
         }
       } catch (fallbackError) {
         console.warn(`[prices] fallback current price failed for ${normalizedSymbol}`, fallbackError);
       }
+    }
+
+    if (!Number.isFinite(currentOpen)) {
+      currentOpen = null;
+    }
+    if (!Number.isFinite(previousClose)) {
+      previousClose = null;
     }
 
     if (!Number.isFinite(currentPrice)) {
@@ -1847,7 +1863,7 @@ app.post('/api/prices/details', requireAuth, async (req, res) => {
       }
     }
 
-    if (!Number.isFinite(historicalPrice) && targetComparisonDate) {
+    if (preferOpenAI && !Number.isFinite(historicalPrice) && targetComparisonDate) {
       const openAiHistorical = await fetchHistoricalPriceFromOpenAI(normalizedSymbol, targetComparisonDate.toISOString());
       if (openAiHistorical) {
         historicalPrice = Number(openAiHistorical.price);
@@ -1890,6 +1906,8 @@ app.post('/api/prices/details', requireAuth, async (req, res) => {
       historical_price: historicalPrice,
       historical_price_date: historicalPriceDate,
       historical_price_timestamp: historicalPriceTimestamp,
+      current_open: currentOpen,
+      previous_close: previousClose,
       provider: priceSource || 'stooq',
       metadata: responseMetadata,
     });
@@ -1998,6 +2016,12 @@ app.post('/api/prices', requireAuth, async (req, res) => {
 app.listen(PORT, () => {
   console.log(`[server] Prism AI backend listening on http://localhost:${PORT}`);
 });
+
+
+
+
+
+
 
 
 

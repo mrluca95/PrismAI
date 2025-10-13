@@ -1,7 +1,7 @@
 
 import React, { useState, useEffect } from 'react';
 import { Upload, Camera, Loader2, CheckCircle, AlertTriangle } from 'lucide-react';
-import { UploadFile, ExtractDataFromUploadedFile } from '@/integrations/Core';
+import { UploadFile, ExtractDataFromUploadedFile, FetchPriceDetails } from '@/integrations/Core';
 import { Asset } from '@/entities/Asset';
 import AutocompleteInput from '../ui/AutocompleteInput';
 
@@ -137,12 +137,33 @@ export default function ImagePortfolioImport({ onSuccess }) {
       for (const extractedAsset of extractedData.assets) {
         const existingAsset = existingAssets.find(a => a.symbol === extractedAsset.symbol && a.broker === brokerName.trim());
 
-        // Sanitize data and calculate missing fields
         const assetPayload = {
           ...extractedAsset,
           broker: brokerName.trim(),
           purchase_price: extractedAsset.purchase_price || extractedAsset.current_price,
         };
+
+        try {
+          const today = new Date();
+          const priceDetails = await FetchPriceDetails({
+            symbol: extractedAsset.symbol,
+            date: today.toISOString().slice(0, 10),
+            preferOpenAI: true,
+          });
+          const fetchedCurrent = Number(priceDetails?.current_price);
+          if (Number.isFinite(fetchedCurrent)) {
+            assetPayload.current_price = fetchedCurrent;
+          }
+          const fetchedHistorical = Number(priceDetails?.historical_price);
+          if (!Number.isFinite(assetPayload.purchase_price) || assetPayload.purchase_price === 0) {
+            const fallbackPurchase = Number.isFinite(fetchedHistorical) ? fetchedHistorical : fetchedCurrent;
+            if (Number.isFinite(fallbackPurchase)) {
+              assetPayload.purchase_price = fallbackPurchase;
+            }
+          }
+        } catch (priceError) {
+          console.warn('[ImagePortfolioImport] price lookup failed', priceError);
+        }
 
         if (existingAsset) {
           // Update existing asset
@@ -306,3 +327,4 @@ export default function ImagePortfolioImport({ onSuccess }) {
     </div>
   );
 }
+
