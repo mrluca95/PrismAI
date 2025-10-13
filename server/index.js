@@ -1878,11 +1878,10 @@ app.post('/api/prices/details', requireAuth, async (req, res) => {
 
     if (!Number.isFinite(historicalPrice)) {
       const yahooHistorical = await resolveYahooHistoricalPrice(normalizedSymbol, targetDateTime || targetDate || now);
-        if (yahooHistorical) {
-          historicalPrice = yahooHistorical.price;
-          historicalPriceDate = yahooHistorical.date;
-          historicalPriceTimestamp = yahooHistorical.timestamp;
-        }
+      if (yahooHistorical) {
+        historicalPrice = yahooHistorical.price;
+        historicalPriceDate = yahooHistorical.date;
+        historicalPriceTimestamp = yahooHistorical.timestamp;
       }
     }
 
