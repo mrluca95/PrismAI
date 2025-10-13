@@ -6,7 +6,9 @@ import { CurrencyProvider } from '@/context/CurrencyContext.jsx';
 import { AuthProvider } from '@/context/AuthContext.jsx';
 import './index.css';
 
-const basename = (import.meta.env.BASE_URL || '/').replace(/\/$/, '') || '/';
+const rawBaseUrl = import.meta.env.BASE_URL || '/';
+const normalizedBase = rawBaseUrl === './' ? '/' : rawBaseUrl;
+const basename = normalizedBase.replace(/\/$/, '') || '/';
 
 ReactDOM.createRoot(document.getElementById('root')).render(
   <React.StrictMode>

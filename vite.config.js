@@ -2,7 +2,7 @@ import { defineConfig } from 'vite';
 import react from '@vitejs/plugin-react';
 import path from 'path';
 
-const base = process.env.GITHUB_REPOSITORY?.endsWith('/PrismAI') ? '/PrismAI/' : '/';
+const base = './';
 
 export default defineConfig({
   base,

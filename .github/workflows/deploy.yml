@@ -35,6 +35,9 @@ jobs:
         env:
           VITE_API_BASE_URL: ${{ vars.VITE_API_BASE_URL }}
 
+      - name: Copy CNAME for custom domain
+        run: cp CNAME dist/CNAME
+
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3
         with:
