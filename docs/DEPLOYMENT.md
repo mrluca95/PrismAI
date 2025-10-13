@@ -79,7 +79,7 @@ Ensure the frontend uses the same origin via `VITE_API_BASE_URL`. Because the ap
 4. Add environment variables from `.env` (including `NODE_VERSION`).
 5. Set `CORS_ALLOWED_ORIGINS` to include both local dev and production frontend origins.
 6. Enable the Render health check (`/api/health`).
-7. After deploy, note the public URL—use it for `VITE_API_BASE_URL` and OAuth callbacks.
+7. After deploy, note the public URL--use it for `VITE_API_BASE_URL` and OAuth callbacks.
 
 ## 7. Deploying the Frontend
 
