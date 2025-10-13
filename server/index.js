@@ -163,21 +163,273 @@ const priceHistoryInFlight = new Map();
 const priceIntradayCache = new Map();
 const priceIntradayInFlight = new Map();
 
-let hasLoggedMissingAlphaKey = false;
-const warnMissingAlphaKey = () => {
-  if (hasLoggedMissingAlphaKey) {
-    return;
-  }
-  console.warn('[prices] ALPHA_VANTAGE_API_KEY is not configured. Falling back to secondary price providers.');
-  hasLoggedMissingAlphaKey = true;
-};
-
 const SYMBOL_SEARCH_TTL_MS = Number(process.env.SYMBOL_SEARCH_TTL_MS || 1000 * 60 * 10);
 const SYMBOL_SEARCH_MAX_RESULTS = Number(process.env.SYMBOL_SEARCH_MAX_RESULTS || 25);
 const symbolSearchCache = new Map();
 
+const YAHOO_CHART_HEADERS = {
+  'User-Agent': 'PrismAI/1.0 (+https://github.com/mrluca95/PrismAI)',
+  Accept: 'application/json',
+};
+
+const yahooSymbolCache = new Map();
+
+const mapYahooChartType = (instrumentType = '') => {
+  const lowered = String(instrumentType || '').toLowerCase();
+  if (lowered.includes('etf')) return 'etf';
+  if (lowered.includes('mutual')) return 'mutual_fund';
+  if (lowered.includes('bond')) return 'bond';
+  if (lowered.includes('crypto')) return 'crypto';
+  if (lowered.includes('currency')) return 'currency';
+  return 'stock';
+};
+
+const buildYahooQuoteEntry = (symbol, yahooSymbol, chartResult) => {
+  const meta = chartResult?.meta || {};
+  const quote = chartResult?.indicators?.quote?.[0] || {};
+  const closes = Array.isArray(quote?.close) ? quote.close : [];
+
+  let price = Number(meta?.regularMarketPrice);
+  if (!Number.isFinite(price) && closes.length > 0) {
+    price = Number(closes[closes.length - 1]);
+  }
+  if (!Number.isFinite(price)) {
+    return null;
+  }
+
+  const timestamp = Number.isFinite(meta?.regularMarketTime)
+    ? new Date(meta.regularMarketTime * 1000).toISOString()
+    : null;
+  const previousClose = Number(meta?.chartPreviousClose ?? meta?.previousClose);
+  const currency = meta?.currency || null;
+  const exchange = meta?.fullExchangeName || meta?.exchangeName || null;
+  const name = meta?.longName || meta?.shortName || null;
+  const typeGuess = mapYahooChartType(meta?.instrumentType || meta?.quoteType || '');
+
+  return {
+    source: 'yahoo_chart',
+    value: {
+      price,
+      previousClose: Number.isFinite(previousClose) ? previousClose : null,
+      currency,
+      exchange,
+      timestamp,
+    },
+    meta: {
+      name,
+      type: typeGuess,
+      yahooSymbol,
+    },
+    timestamp: nowMs(),
+  };
+};
+
+const buildYahooSymbolCandidates = (symbol) => {
+  const candidates = new Set();
+  const trimmed = String(symbol || '').trim();
+  if (!trimmed) {
+    return [];
+  }
+
+  const collapsed = trimmed.replace(/\s+/g, '');
+  const dotted = trimmed.replace(/\s+/g, '.');
+  const dashed = trimmed.replace(/\s+/g, '-');
+
+  candidates.add(trimmed);
+  candidates.add(collapsed);
+  candidates.add(dotted);
+  candidates.add(dashed);
+
+  if (!trimmed.includes('.')) {
+    candidates.add(`${collapsed}.US`);
+    candidates.add(`${trimmed}.US`);
+  }
+
+  return Array.from(candidates).filter(Boolean);
+};
+
+const fetchYahooChart = async (symbol, { range = '1d', interval = '1m' } = {}) => {
+  if (!symbol) {
+    return null;
+  }
+  const url = new URL(`https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbol)}`);
+  url.searchParams.set('range', range);
+  url.searchParams.set('interval', interval);
+  url.searchParams.set('includePrePost', 'true');
+
+  const response = await fetch(url, { headers: YAHOO_CHART_HEADERS });
+  if (!response.ok) {
+    const error = new Error(`Yahoo chart responded with ${response.status}`);
+    error.status = response.status;
+    throw error;
+  }
+
+  const json = await response.json();
+  if (json?.chart?.error) {
+    // Treat "Not Found" as a soft miss — return null so we can try alternatives.
+    if (json.chart.error.code === 'Not Found') {
+      return null;
+    }
+    const error = new Error(json.chart.error.description || 'Yahoo chart returned an error response.');
+    error.code = json.chart.error.code;
+    throw error;
+  }
+
+  const result = json?.chart?.result?.[0];
+  if (!result?.meta) {
+    return null;
+  }
+  return result;
+};
+
+const fetchYahooSymbolSearchPayload = async (query) => {
+  const trimmed = String(query || '').trim();
+  if (!trimmed) {
+    return { symbols: [] };
+  }
+
+  const normalized = trimmed.toLowerCase();
+  const cached = symbolSearchCache.get(normalized);
+  if (cached && Number.isFinite(SYMBOL_SEARCH_TTL_MS) && SYMBOL_SEARCH_TTL_MS > 0 && nowMs() - cached.timestamp < SYMBOL_SEARCH_TTL_MS) {
+    return cached.value;
+  }
+
+  try {
+    const url = `https://query1.finance.yahoo.com/v1/finance/search?q=${encodeURIComponent(trimmed)}&quotesCount=${SYMBOL_SEARCH_MAX_RESULTS}&newsCount=0&enableFuzzyQuery=false&lang=en-US&region=US`;
+    const response = await fetch(url, { headers: YAHOO_CHART_HEADERS });
+    if (!response.ok) {
+      throw new Error(`Yahoo search responded with ${response.status}`);
+    }
+
+    const json = await response.json();
+    const symbols = (json?.quotes || []).map((quote) => ({
+      symbol: String(quote?.symbol || '').toUpperCase(),
+      name: quote?.shortname || quote?.longname || quote?.name || '',
+      exchange: quote?.exchange || quote?.exchDisp || '',
+      type: quote?.quoteType || quote?.typeDisp || '',
+    })).filter((entry) => entry.symbol);
+
+    const payload = { symbols };
+    symbolSearchCache.set(normalized, { value: payload, timestamp: nowMs() });
+    return payload;
+  } catch (error) {
+    console.warn(`[prices] yahoo symbol search failed for ${trimmed}`, error);
+    return { symbols: [] };
+  }
+};
+
+const resolveYahooQuoteEntry = async (symbol) => {
+  const normalized = normalizeSymbol(symbol);
+  if (!normalized) {
+    return null;
+  }
+
+  const metadata = KNOWN_SYMBOL_META.get(normalized) || null;
+  const candidates = [];
+  if (metadata?.yahooSymbol) {
+    candidates.push(metadata.yahooSymbol);
+  }
+  const cachedSymbol = yahooSymbolCache.get(normalized);
+  if (cachedSymbol) {
+    candidates.push(cachedSymbol);
+  }
+  candidates.push(...buildYahooSymbolCandidates(normalized));
+
+  const attempted = new Set();
+  for (const candidate of candidates) {
+    const key = String(candidate || '').trim();
+    if (!key || attempted.has(key)) {
+      continue;
+    }
+    attempted.add(key);
+    try {
+      const chartResult = await fetchYahooChart(key);
+      if (!chartResult) {
+        continue;
+      }
+      const entry = buildYahooQuoteEntry(normalized, key, chartResult);
+      if (entry) {
+        yahooSymbolCache.set(normalized, key);
+        return { entry, chart: chartResult };
+      }
+    } catch (error) {
+      console.warn(`[prices] yahoo chart failed for ${normalized} via ${key}`, error);
+    }
+  }
+
+  const searchPayload = await fetchYahooSymbolSearchPayload(normalized);
+  for (const match of searchPayload.symbols || []) {
+    const key = String(match?.symbol || '').toUpperCase();
+    if (!key || attempted.has(key)) {
+      continue;
+    }
+    attempted.add(key);
+    try {
+      const chartResult = await fetchYahooChart(key);
+      if (!chartResult) {
+        continue;
+      }
+      const entry = buildYahooQuoteEntry(normalized, key, chartResult);
+      if (entry) {
+        yahooSymbolCache.set(normalized, key);
+        return { entry, chart: chartResult };
+      }
+    } catch (error) {
+      console.warn(`[prices] yahoo chart failed for ${normalized} via search symbol ${key}`, error);
+    }
+  }
+
+  return null;
+};
+
+const extractSeriesFromChart = (chartResult) => {
+  if (!chartResult) {
+    return [];
+  }
+  const timestamps = Array.isArray(chartResult?.timestamp) ? chartResult.timestamp : [];
+  const closes = Array.isArray(chartResult?.indicators?.quote?.[0]?.close)
+    ? chartResult.indicators.quote[0].close
+    : [];
+
+  if (timestamps.length === 0 || closes.length === 0) {
+    return [];
+  }
+
+  const series = [];
+  for (let i = 0; i < timestamps.length; i += 1) {
+    const time = timestamps[i];
+    const close = closes[i];
+    const closeNumber = Number(close);
+    if (!Number.isFinite(time) || !Number.isFinite(closeNumber)) {
+      continue;
+    }
+    series.push({
+      timestamp: new Date(time * 1000).toISOString(),
+      close: closeNumber,
+    });
+  }
+  return series;
+};
+
+const chooseYahooRangeForTarget = (diffMs, hasTime) => {
+  const diffDays = diffMs / (1000 * 60 * 60 * 24);
+  if (hasTime && diffDays <= 5) {
+    return { range: '5d', interval: '5m' };
+  }
+  if (diffDays <= 30) {
+    return { range: '1mo', interval: '1d' };
+  }
+  if (diffDays <= 365) {
+    return { range: '1y', interval: '1d' };
+  }
+  if (diffDays <= 365 * 5) {
+    return { range: '5y', interval: '1wk' };
+  }
+  return { range: 'max', interval: '1mo' };
+};
+
 const mapToStooqSymbol = (symbol) => {
-  const cleaned = String(symbol || '').trim().toLowerCase();
+  const cleaned = String(symbol || '').trim().toLowerCase().replace(/\s+/g, '');
   if (!cleaned) {
     return null;
   }
@@ -349,8 +601,12 @@ const KNOWN_SYMBOL_META = new Map([
   ['BND', { name: 'Vanguard Total Bond Market ETF', type: 'bond' }],
   ['GLD', { name: 'SPDR Gold Shares', type: 'etf' }],
   ['SLV', { name: 'iShares Silver Trust', type: 'etf' }],
-  ['BTC', { name: 'Bitcoin', type: 'crypto' }],
-  ['ETH', { name: 'Ethereum', type: 'crypto' }],
+  ['BTC', { name: 'Bitcoin', type: 'crypto', yahooSymbol: 'BTC-USD' }],
+  ['ETH', { name: 'Ethereum', type: 'crypto', yahooSymbol: 'ETH-USD' }],
+  ['BRK B', { name: 'Berkshire Hathaway Inc. Class B', type: 'stock', yahooSymbol: 'BRK-B' }],
+  ['NESN', { name: 'Nestlé S.A.', type: 'stock', yahooSymbol: 'NESN.SW' }],
+  ['CLS', { name: 'Celestica Inc.', type: 'stock', yahooSymbol: 'CLS.TO' }],
+  ['IAG', { name: 'International Consolidated Airlines Group S.A.', type: 'stock', yahooSymbol: 'IAG.L' }],
 ]);
 
 const buildLlmCacheKey = ({ prompt, schema, system_instruction, add_context_from_internet }) =>
@@ -528,54 +784,6 @@ const buildMessages = (prompt, systemInstruction, addContext) => {
   ];
 };
 
-const fetchPriceFromAlphaVantage = async (symbol, apiKey) => {
-  const url = `https://www.alphavantage.co/query?function=GLOBAL_QUOTE&symbol=${encodeURIComponent(symbol)}&apikey=${apiKey}`;
-  const response = await fetch(url);
-
-  if (!response.ok) {
-    const error = new Error(`Alpha Vantage responded with ${response.status}`);
-    error.status = response.status;
-    throw error;
-  }
-
-  const json = await response.json();
-  if (json?.Note || json?.Information) {
-    const error = new Error(json.Note || json.Information || 'Alpha Vantage rate limit reached. Try again shortly.');
-    error.isRateLimit = true;
-    throw error;
-  }
-
-  const quote = json?.['Global Quote'];
-  if (!quote) {
-    return null;
-  }
-
-  const price = Number(quote['05. price']);
-  if (!Number.isFinite(price)) {
-    return null;
-  }
-
-  const previousClose = Number(quote['08. previous close']);
-  const tradingDay = quote['07. latest trading day'];
-  const timestamp = tradingDay
-    ? new Date(`${tradingDay}T16:00:00Z`).toISOString()
-    : new Date().toISOString();
-  const meta = KNOWN_SYMBOL_META.get(symbol) || null;
-
-  return {
-    source: 'alpha_vantage',
-    value: {
-      price,
-      previousClose: Number.isFinite(previousClose) ? previousClose : null,
-      currency: null,
-      exchange: null,
-      timestamp,
-    },
-    meta,
-    timestamp: nowMs(),
-  };
-};
-
 const buildStooqQuoteEntry = async (symbol) => {
   try {
     const stooqData = await fetchDailySeriesFromStooq(symbol);
@@ -615,295 +823,207 @@ const buildStooqQuoteEntry = async (symbol) => {
   }
 };
 
-const mapYahooQuoteType = (quoteType = '') => {
-  const lowered = quoteType.toLowerCase();
-  if (lowered.includes('etf')) return 'etf';
-  if (lowered.includes('mutual')) return 'mutual_fund';
-  if (lowered.includes('bond')) return 'bond';
-  if (lowered.includes('crypto')) return 'crypto';
-  return 'stock';
-};
-
-const fetchYahooQuote = async (symbol) => {
-  try {
-    const url = `https://query1.finance.yahoo.com/v7/finance/quote?symbols=${encodeURIComponent(symbol)}`;
-    const response = await fetch(url);
-    if (!response.ok) {
-      throw new Error(`Yahoo quote responded with ${response.status}`);
-    }
-    const json = await response.json();
-    const quote = json?.quoteResponse?.result?.[0];
-    if (!quote) {
-      return null;
-    }
-    const price = Number(quote?.regularMarketPrice ?? quote?.postMarketPrice ?? quote?.preMarketPrice ?? null);
-    if (!Number.isFinite(price)) {
-      return null;
-    }
-    const timestamp = quote?.regularMarketTime ? new Date(quote.regularMarketTime * 1000).toISOString() : null;
-    const previousClose = Number(quote?.regularMarketPreviousClose ?? quote?.previousClose ?? null);
-    const name = quote?.longName || quote?.shortName || null;
-    const type = mapYahooQuoteType(quote?.quoteType || '');
-    const exchange = quote?.fullExchangeName || quote?.exchange || null;
-    const currency = quote?.currency || null;
-    return {
-      source: 'yahoo',
-      value: {
-        price,
-        previousClose: Number.isFinite(previousClose) ? previousClose : null,
-        currency,
-        exchange,
-        timestamp,
-      },
-      meta: { name, type },
-      timestamp: nowMs(),
-    };
-  } catch (error) {
-    console.warn(`[prices] yahoo quote failed for ${symbol}`, error);
+const resolveYahooHistoricalPrice = async (symbol, targetDateTime) => {
+  const normalized = normalizeSymbol(symbol);
+  if (!normalized) {
     return null;
   }
-};
+  const target = targetDateTime ? new Date(targetDateTime) : new Date();
+  if (Number.isNaN(target.getTime())) {
+    return null;
+  }
 
-const resolveYahooHistoricalPrice = async (symbol, targetDateTime) => {
   try {
-    const target = targetDateTime ? new Date(targetDateTime) : new Date();
+    const resolved = await resolveYahooQuoteEntry(normalized);
+    const yahooSymbol = resolved?.entry?.meta?.yahooSymbol || yahooSymbolCache.get(normalized);
+    if (!yahooSymbol) {
+      return null;
+    }
+
     const now = Date.now();
     const diffMs = Math.abs(now - target.getTime());
-    const thirtyDaysMs = 1000 * 60 * 60 * 24 * 30;
-    const interval = diffMs < thirtyDaysMs ? '1h' : '1d';
-    const windowMs = interval === '1h' ? 1000 * 60 * 60 * 24 * 3 : 1000 * 60 * 60 * 24 * 10;
-    const start = Math.max(0, Math.floor((target.getTime() - windowMs) / 1000));
-    const end = Math.floor((target.getTime() + windowMs) / 1000);
-    const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbol)}?period1=${start}&period2=${end}&interval=${interval}&includePrePost=false&events=div%2Csplit`;
-    const response = await fetch(url);
-    if (!response.ok) {
-      throw new Error(`Yahoo chart responded with ${response.status}`);
-    }
-    const json = await response.json();
-    const result = json?.chart?.result?.[0];
-    const timestamps = result?.timestamp || [];
-    const quotes = result?.indicators?.quote?.[0]?.close || [];
-    if (!Array.isArray(timestamps) || !Array.isArray(quotes) || timestamps.length === 0) {
+    const hasTimeComponent = targetDateTime instanceof Date && !Number.isNaN(targetDateTime?.getTime()) && (target.getUTCHours() !== 0 || target.getUTCMinutes() !== 0);
+    const rangeConfig = chooseYahooRangeForTarget(diffMs, hasTimeComponent);
+    const chart = await fetchYahooChart(yahooSymbol, rangeConfig);
+    if (!chart) {
       return null;
     }
+    const series = extractSeriesFromChart(chart);
+    if (series.length === 0) {
+      return null;
+    }
+
     const targetMs = target.getTime();
-    let chosenPrice = null;
-    let chosenTimestamp = null;
-    for (let i = timestamps.length - 1; i >= 0; i -= 1) {
-      const tsMs = timestamps[i] * 1000;
-      const close = Number(quotes[i]);
-      if (!Number.isFinite(close)) {
+    let chosen = null;
+    for (let i = series.length - 1; i >= 0; i -= 1) {
+      const point = series[i];
+      const ts = new Date(point.timestamp).getTime();
+      if (!Number.isFinite(ts) || !Number.isFinite(point.close)) {
         continue;
       }
-      chosenPrice = close;
-      chosenTimestamp = tsMs;
-      if (tsMs <= targetMs) {
+      if (ts <= targetMs) {
+        chosen = point;
         break;
       }
+      if (!chosen) {
+        chosen = point;
+      }
     }
-    if (!Number.isFinite(chosenPrice)) {
+
+    if (!chosen || !Number.isFinite(chosen.close)) {
       return null;
     }
-    const ts = new Date(chosenTimestamp);
+
     return {
-      price: chosenPrice,
-      date: ts.toISOString().slice(0, 10),
-      timestamp: ts.toISOString(),
+      price: Number(chosen.close),
+      date: chosen.timestamp.slice(0, 10),
+      timestamp: chosen.timestamp,
     };
   } catch (error) {
-    console.warn(`[prices] yahoo historical fallback failed for ${symbol}`, error);
+    console.warn(`[prices] yahoo historical price failed for ${symbol}`, error);
     return null;
   }
 };
 
 const isValidQuoteEntry = (entry) => Boolean(entry && Number.isFinite(entry?.value?.price));
 
-const resolvePriceQuote = async (symbol, apiKey) => {
-  const cached = priceCache.get(symbol);
+const resolvePriceQuote = async (symbol) => {
+  const cacheKey = normalizeSymbol(symbol);
+  const cached = priceCache.get(cacheKey);
   if (isCacheEntryFresh(cached, PRICE_CACHE_TTL_MS)) {
     return cached;
   }
 
-  const inFlight = priceInFlight.get(symbol);
+  const inFlight = priceInFlight.get(cacheKey);
   if (inFlight) {
     return inFlight;
   }
 
   const request = (async () => {
-    const providers = [
-      { label: 'yahoo quote', exec: () => fetchYahooQuote(symbol) },
-      { label: 'stooq quote fallback', exec: () => buildStooqQuoteEntry(symbol) },
-    ];
-
-    if (apiKey) {
-      providers.push({ label: 'alpha vantage quote', exec: () => fetchPriceFromAlphaVantage(symbol, apiKey) });
+    let entry = null;
+    try {
+      const resolved = await resolveYahooQuoteEntry(cacheKey);
+      if (resolved?.entry) {
+        entry = resolved.entry;
+      }
+    } catch (error) {
+      console.warn(`[prices] yahoo quote resolution failed for ${cacheKey}`, error);
     }
 
-    let entry = null;
-    for (const provider of providers) {
-      try {
-        const candidate = await provider.exec();
-        if (!isValidQuoteEntry(candidate)) {
-          if (candidate && !Number.isFinite(candidate?.value?.price)) {
-            console.warn(`[prices] ${provider.label} returned invalid price for ${symbol}`);
-          }
-          continue;
-        }
-        entry = candidate;
-        break;
-      } catch (error) {
-        console.warn(`[prices] ${provider.label} failed for ${symbol}`, error);
-      }
+    if (!isValidQuoteEntry(entry)) {
+      entry = await buildStooqQuoteEntry(cacheKey);
     }
 
     if (entry && PRICE_CACHE_TTL_MS > 0) {
-      priceCache.set(symbol, entry);
+      priceCache.set(cacheKey, entry);
       pruneCache(priceCache, PRICE_CACHE_MAX_ENTRIES);
     }
     return entry;
   })();
 
-  priceInFlight.set(symbol, request);
+  priceInFlight.set(cacheKey, request);
 
   try {
     return await request;
   } finally {
-    priceInFlight.delete(symbol);
+    priceInFlight.delete(cacheKey);
   }
 };
-const fetchIntradaySeriesFromAlpha = async (symbol, apiKey) => {
-  const url = `https://www.alphavantage.co/query?function=TIME_SERIES_INTRADAY&symbol=${encodeURIComponent(symbol)}&interval=5min&outputsize=full&apikey=${apiKey}`;
-  const response = await fetch(url);
-
-  if (!response.ok) {
-    const error = new Error(`Alpha Vantage responded with ${response.status}`);
-    error.status = response.status;
-    throw error;
-  }
-
-  const json = await response.json();
-  if (json?.Note || json?.Information) {
-    const error = new Error(json.Note || json.Information || 'Alpha Vantage rate limit reached. Try again shortly.');
-    error.isRateLimit = true;
-    throw error;
-  }
-
-  const series = json?.['Time Series (5min)'];
-  if (!series || typeof series !== 'object') {
-    return null;
-  }
-
-  const parsed = Object.entries(series)
-    .map(([timestamp, values]) => ({
-      timestamp,
-      close: Number(values?.['4. close'] ?? values?.['5. adjusted close'] ?? values?.['1. open'] ?? null),
-    }))
-    .filter((entry) => Number.isFinite(entry.close));
-
-  return {
-    series: parsed,
-    timestamp: nowMs(),
-  };
-};
-
-const resolveIntradaySeries = async (symbol, apiKey) => {
-  if (!apiKey) {
-    return null;
-  }
-  const cached = priceIntradayCache.get(symbol);
+const resolveIntradaySeries = async (symbol) => {
+  const cacheKey = normalizeSymbol(symbol);
+  const cached = priceIntradayCache.get(cacheKey);
   if (isCacheEntryFresh(cached, PRICE_INTRADAY_TTL_MS)) {
     return cached;
   }
 
-  const inFlight = priceIntradayInFlight.get(symbol);
+  const inFlight = priceIntradayInFlight.get(cacheKey);
   if (inFlight) {
     return inFlight;
   }
 
   const request = (async () => {
-    const entry = await fetchIntradaySeriesFromAlpha(symbol, apiKey);
-    if (entry && PRICE_INTRADAY_TTL_MS > 0) {
-      priceIntradayCache.set(symbol, entry);
-      pruneCache(priceIntradayCache, PRICE_INTRADAY_MAX_ENTRIES);
+    try {
+      const resolved = await resolveYahooQuoteEntry(cacheKey);
+      const yahooSymbol = resolved?.entry?.meta?.yahooSymbol || yahooSymbolCache.get(cacheKey);
+      if (!yahooSymbol) {
+        return null;
+      }
+      const chart = await fetchYahooChart(yahooSymbol, { range: '5d', interval: '5m' });
+      if (!chart) {
+        return null;
+      }
+      const series = extractSeriesFromChart(chart);
+      if (series.length === 0) {
+        return null;
+      }
+      const entry = { series, timestamp: nowMs() };
+      if (PRICE_INTRADAY_TTL_MS > 0) {
+        priceIntradayCache.set(cacheKey, entry);
+        pruneCache(priceIntradayCache, PRICE_INTRADAY_MAX_ENTRIES);
+      }
+      return entry;
+    } catch (error) {
+      console.warn(`[prices] yahoo intraday lookup failed for ${cacheKey}`, error);
+      return null;
     }
-    return entry;
   })();
 
-  priceIntradayInFlight.set(symbol, request);
+  priceIntradayInFlight.set(cacheKey, request);
 
   try {
     return await request;
   } finally {
-    priceIntradayInFlight.delete(symbol);
+    priceIntradayInFlight.delete(cacheKey);
   }
 };
-const fetchDailySeriesFromAlpha = async (symbol, apiKey) => {
-  if (!apiKey) {
-    return null;
-  }
-  const url = `https://www.alphavantage.co/query?function=TIME_SERIES_DAILY_ADJUSTED&symbol=${encodeURIComponent(symbol)}&outputsize=compact&apikey=${apiKey}`;
-  const response = await fetch(url);
-
-  if (!response.ok) {
-    const error = new Error(`Alpha Vantage responded with ${response.status}`);
-    error.status = response.status;
-    throw error;
-  }
-
-  const json = await response.json();
-  if (json?.Note || json?.Information) {
-    const error = new Error(json.Note || json.Information || 'Alpha Vantage rate limit reached. Try again shortly.');
-    error.isRateLimit = true;
-    throw error;
-  }
-
-  const series = json?.['Time Series (Daily)'];
-  if (!series || typeof series !== 'object') {
-    return null;
-  }
-
-  const parsed = Object.entries(series)
-    .map(([date, values]) => ({
-      date,
-      close: Number(values?.['4. close']) || Number(values?.['5. adjusted close']) || Number(values?.['1. open']) || null,
-    }))
-    .filter((entry) => entry.close && Number.isFinite(entry.close));
-
-  return {
-    series: parsed,
-    timestamp: nowMs(),
-  };
-};
-
-const resolveHistoricalSeries = async (symbol, apiKey) => {
-  if (!apiKey) {
-    return null;
-  }
-  const cached = priceHistoryCache.get(symbol);
+const resolveHistoricalSeries = async (symbol) => {
+  const cacheKey = normalizeSymbol(symbol);
+  const cached = priceHistoryCache.get(cacheKey);
   if (isCacheEntryFresh(cached, PRICE_HISTORY_TTL_MS)) {
     return cached;
   }
 
-  const inFlight = priceHistoryInFlight.get(symbol);
+  const inFlight = priceHistoryInFlight.get(cacheKey);
   if (inFlight) {
     return inFlight;
   }
 
   const request = (async () => {
-    const entry = await fetchDailySeriesFromAlpha(symbol, apiKey);
-    if (entry && PRICE_HISTORY_TTL_MS > 0) {
-      priceHistoryCache.set(symbol, entry);
-      pruneCache(priceHistoryCache, PRICE_HISTORY_MAX_ENTRIES);
+    try {
+      const resolved = await resolveYahooQuoteEntry(cacheKey);
+      const yahooSymbol = resolved?.entry?.meta?.yahooSymbol || yahooSymbolCache.get(cacheKey);
+      if (!yahooSymbol) {
+        return null;
+      }
+      const chart = await fetchYahooChart(yahooSymbol, { range: 'max', interval: '1d' });
+      if (!chart) {
+        return null;
+      }
+      const series = extractSeriesFromChart(chart).map((point) => ({
+        date: point.timestamp.slice(0, 10),
+        close: point.close,
+      }));
+      if (series.length === 0) {
+        return null;
+      }
+      const entry = { series, timestamp: nowMs() };
+      if (PRICE_HISTORY_TTL_MS > 0) {
+        priceHistoryCache.set(cacheKey, entry);
+        pruneCache(priceHistoryCache, PRICE_HISTORY_MAX_ENTRIES);
+      }
+      return entry;
+    } catch (error) {
+      console.warn(`[prices] yahoo historical series failed for ${cacheKey}`, error);
+      return null;
     }
-    return entry;
   })();
 
-  priceHistoryInFlight.set(symbol, request);
+  priceHistoryInFlight.set(cacheKey, request);
 
   try {
     return await request;
   } finally {
-    priceHistoryInFlight.delete(symbol);
+    priceHistoryInFlight.delete(cacheKey);
   }
 };
 
@@ -1079,33 +1199,8 @@ app.get('/api/symbols/search', requireAuth, async (req, res) => {
     return res.json({ symbols: [] });
   }
 
-  const normalized = query.toLowerCase();
-  const cached = symbolSearchCache.get(normalized);
-  if (cached && Number.isFinite(SYMBOL_SEARCH_TTL_MS) && SYMBOL_SEARCH_TTL_MS > 0 && nowMs() - cached.timestamp < SYMBOL_SEARCH_TTL_MS) {
-    return res.json(cached.value);
-  }
-
-  try {
-    const url = `https://query1.finance.yahoo.com/v1/finance/search?q=${encodeURIComponent(query)}&quotesCount=${SYMBOL_SEARCH_MAX_RESULTS}&newsCount=0&enableFuzzyQuery=false&lang=en-US&region=US`;
-    const response = await fetch(url, { headers: { 'User-Agent': 'PrismAI/1.0 (+https://github.com/mrluca95/PrismAI)' } });
-    if (!response.ok) {
-      throw new Error(`Yahoo search responded with ${response.status}`);
-    }
-    const json = await response.json();
-    const symbols = (json?.quotes || []).map((quote) => ({
-      symbol: String(quote?.symbol || '').toUpperCase(),
-      name: quote?.shortname || quote?.longname || quote?.name || '',
-      exchange: quote?.exchange || quote?.exchDisp || '',
-      type: quote?.quoteType || quote?.typeDisp || '',
-    })).filter((entry) => entry.symbol);
-
-    const payload = { symbols: symbols.slice(0, SYMBOL_SEARCH_MAX_RESULTS) };
-    symbolSearchCache.set(normalized, { timestamp: nowMs(), value: payload });
-    return res.json(payload);
-  } catch (error) {
-    console.warn('[server] symbol search error', error);
-    return res.status(502).json({ symbols: [] });
-  }
+  const payload = await fetchYahooSymbolSearchPayload(query);
+  return res.json(payload);
 });
 
 app.get('/api/health', optionalAuth, (req, res) => {
@@ -1470,11 +1565,6 @@ app.post('/api/prices/details', requireAuth, async (req, res) => {
   let resolvedName = metadata?.name || null;
   let resolvedType = metadata?.type || null;
 
-  const apiKey = process.env.ALPHA_VANTAGE_API_KEY;
-  if (!apiKey) {
-    warnMissingAlphaKey();
-  }
-
   const limits = getTierLimits(req.user.tier);
   const usage = await getUsage(req.user.id);
   if (usage.priceRequests + 1 > limits.quotes) {
@@ -1505,7 +1595,7 @@ app.post('/api/prices/details', requireAuth, async (req, res) => {
   try {
     let quoteEntry = null;
     try {
-      quoteEntry = await resolvePriceQuote(normalizedSymbol, apiKey);
+      quoteEntry = await resolvePriceQuote(normalizedSymbol);
     } catch (quoteError) {
       if (quoteError?.isRateLimit || quoteError?.status) {
         console.warn(`[prices] primary quote provider unavailable for ${normalizedSymbol}`, quoteError);
@@ -1517,7 +1607,7 @@ app.post('/api/prices/details', requireAuth, async (req, res) => {
     const now = new Date();
     let currentPrice = Number(quoteEntry?.value?.price);
     let currentPriceTimestamp = quoteEntry?.value?.timestamp || null;
-    let priceSource = quoteEntry?.source || (quoteEntry?.value ? 'alpha_vantage' : null);
+    let priceSource = quoteEntry?.source || null;
     if (quoteEntry?.meta?.name && !resolvedName) {
       resolvedName = quoteEntry.meta.name;
     }
@@ -1563,22 +1653,11 @@ app.post('/api/prices/details', requireAuth, async (req, res) => {
     }
 
     if (!Number.isFinite(currentPrice)) {
-      const yahooQuote = await fetchYahooQuote(normalizedSymbol);
-      if (yahooQuote?.value) {
-        currentPrice = Number(yahooQuote.value.price);
-        currentPriceTimestamp = yahooQuote.value.timestamp || currentPriceTimestamp;
-        priceSource = yahooQuote.source || 'yahoo';
-        if (yahooQuote.meta?.name && !resolvedName) {
-          resolvedName = yahooQuote.meta.name;
-        }
-        if (yahooQuote.meta?.type && !resolvedType) {
-          resolvedType = yahooQuote.meta.type;
-        }
-      }
+      return res.status(404).json({ error: 'No quote data returned for provided symbol.' });
     }
 
-    if (!Number.isFinite(currentPrice)) {
-      return res.status(404).json({ error: 'No quote data returned for provided symbol.' });
+    if (!priceSource) {
+      priceSource = 'yahoo_chart';
     }
 
     let historicalPrice = null;
@@ -1592,16 +1671,16 @@ app.post('/api/prices/details', requireAuth, async (req, res) => {
         const diffMs = now.getTime() - targetDateTime.getTime();
         if (diffMs >= 0 && diffMs <= PRICE_INTRADAY_LOOKBACK_MS) {
           try {
-            const intradaySeries = await resolveIntradaySeries(normalizedSymbol, apiKey);
+            const intradaySeries = await resolveIntradaySeries(normalizedSymbol);
             const parsedSeries = (intradaySeries?.series || [])
-              .map((entry) => ({ ...entry, date: new Date(entry.timestamp.replace(' ', 'T')) }))
+              .map((entry) => ({ ...entry, date: new Date(entry.timestamp) }))
               .filter((entry) => !Number.isNaN(entry.date.getTime()))
               .sort((a, b) => b.date - a.date);
             const intradayMatch = parsedSeries.find((entry) => entry.date <= targetDateTime);
             if (intradayMatch) {
               historicalPrice = Number(intradayMatch.close);
-              historicalPriceDate = intradayMatch.timestamp.split(' ')[0];
-              historicalPriceTimestamp = intradayMatch.date.toISOString();
+              historicalPriceDate = intradayMatch.timestamp.slice(0, 10);
+              historicalPriceTimestamp = intradayMatch.timestamp;
             }
           } catch (intradayError) {
             console.warn(`[prices] intraday series lookup failed for ${normalizedSymbol}`, intradayError);
@@ -1611,7 +1690,7 @@ app.post('/api/prices/details', requireAuth, async (req, res) => {
 
       if (!Number.isFinite(historicalPrice)) {
         try {
-          const historicalSeries = await resolveHistoricalSeries(normalizedSymbol, apiKey);
+          const historicalSeries = await resolveHistoricalSeries(normalizedSymbol);
           const series = historicalSeries?.series || [];
           const parsedDaily = series
             .map((entry) => ({ ...entry, dateObj: new Date(entry.date) }))
@@ -1711,11 +1790,6 @@ app.post('/api/prices', requireAuth, async (req, res) => {
     return res.status(400).json({ error: `You can request up to ${PRICE_MAX_SYMBOLS_PER_REQUEST} symbols at a time.` });
   }
 
-  const apiKey = process.env.ALPHA_VANTAGE_API_KEY;
-  if (!apiKey) {
-    warnMissingAlphaKey();
-  }
-
   const limits = getTierLimits(req.user.tier);
   const usage = await getUsage(req.user.id);
   if (usage.priceRequests + uniqueSymbols.length > limits.quotes) {
@@ -1744,7 +1818,7 @@ app.post('/api/prices', requireAuth, async (req, res) => {
 
   for (const symbol of symbolsToFetch) {
     try {
-      const entry = await resolvePriceQuote(symbol, apiKey);
+      const entry = await resolvePriceQuote(symbol);
       if (entry && entry.value) {
         results[symbol] = cloneValue(entry.value);
       } else if (!results[symbol] && staleFallbacks.has(symbol)) {
