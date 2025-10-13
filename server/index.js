@@ -1674,12 +1674,13 @@ app.post('/api/extract', requireAuth, async (req, res) => {
 
 
 app.post('/api/prices/details', requireAuth, async (req, res) => {
-  const { symbol, date, time } = req.body || {};
+  const { symbol, date, time, prefer_openai } = req.body || {};
   if (!symbol) {
     return res.status(400).json({ error: 'symbol is required' });
   }
 
-  const preferOpenAI = Boolean(prefer_openai);\n  const normalizedSymbol = normalizeSymbol(symbol);
+  const preferOpenAI = Boolean(prefer_openai);
+  const normalizedSymbol = normalizeSymbol(symbol);
   const metadata = KNOWN_SYMBOL_META.get(normalizedSymbol) || null;
   let resolvedName = metadata?.name || null;
   let resolvedType = metadata?.type || null;
