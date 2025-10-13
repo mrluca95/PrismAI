@@ -128,7 +128,49 @@ const parseJsonSafe = (raw) => {
     return tryParseLooseJson(raw);
   }
 };
+const fetchHistoricalPriceFromOpenAI = async (symbol, targetDate) => {
+  if (!openaiClient || !symbol || !targetDate) {
+    return null;
+  }
+  const normalized = normalizeSymbol(symbol);
+  if (!normalized) {
+    return null;
+  }
 
+  const iso = typeof targetDate === 'string' ? targetDate : new Date(targetDate).toISOString();
+  if (!iso) {
+    return null;
+  }
+  const dateOnly = iso.slice(0, 10);
+  const prompt = `Ticker: ${normalized}\nDate: ${dateOnly}\nReturn JSON {"price": number, "currency": "USD", "date": "${dateOnly}"}. Use the official close price for that trading day.`;
+
+  try {
+    const response = await openaiClient.responses.create({
+      model: OPENAI_PRICE_MODEL,
+      input: [
+        {
+          role: 'system',
+          content: 'Respond with compact JSON only. Format: {"price":number,"currency":"USD","date":"YYYY-MM-DD"}.',
+        },
+        { role: 'user', content: prompt },
+      ],
+      max_output_tokens: 60,
+    });
+
+    const text = response?.output_text?.trim();
+    const parsed = parseJsonSafe(text);
+    const price = Number(parsed?.price);
+    if (!Number.isFinite(price) || price <= 0) {
+      return null;
+    }
+    const currency = typeof parsed?.currency === 'string' ? parsed.currency : 'USD';
+    const date = typeof parsed?.date === 'string' ? parsed.date : dateOnly;
+    return { price, currency, date };
+  } catch (error) {
+    console.warn(`[prices] openai historical price failed for ${normalized}`, error);
+    return null;
+  }
+};
 const fetchPriceFromOpenAI = async (symbol) => {
   if (!openaiClient || !symbol) {
     return null;
@@ -1803,9 +1845,22 @@ app.post('/api/prices/details', requireAuth, async (req, res) => {
           console.warn(`[prices] stooq historical fallback failed for ${normalizedSymbol}`, stooqError);
         }
       }
+    }
 
-      if (!Number.isFinite(historicalPrice)) {
-        const yahooHistorical = await resolveYahooHistoricalPrice(normalizedSymbol, targetDateTime || targetDate || now);
+    if (!Number.isFinite(historicalPrice) && targetComparisonDate) {
+      const openAiHistorical = await fetchHistoricalPriceFromOpenAI(normalizedSymbol, targetComparisonDate.toISOString());
+      if (openAiHistorical) {
+        historicalPrice = Number(openAiHistorical.price);
+        historicalPriceDate = openAiHistorical.date || targetComparisonDate.toISOString().slice(0, 10);
+        const guessTimestamp = openAiHistorical.date
+          ? new Date(`${openAiHistorical.date}T16:00:00Z`)
+          : new Date(targetComparisonDate);
+        historicalPriceTimestamp = guessTimestamp.toISOString();
+      }
+    }
+
+    if (!Number.isFinite(historicalPrice)) {
+      const yahooHistorical = await resolveYahooHistoricalPrice(normalizedSymbol, targetDateTime || targetDate || now);
         if (yahooHistorical) {
           historicalPrice = yahooHistorical.price;
           historicalPriceDate = yahooHistorical.date;
