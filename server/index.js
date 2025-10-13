@@ -30,6 +30,8 @@ const DEFAULT_ALLOWED_ORIGINS = [
   'http://127.0.0.1:5173',
   'http://localhost:4173',
   'https://mrluca95.github.io',
+  'https://www.prismai-portfolio.com',
+  'https://prismai-portfolio.com',
 ];
 const allowedOrigins = config.cors.allowedOrigins.length ? config.cors.allowedOrigins : DEFAULT_ALLOWED_ORIGINS;
 const GOOGLE_AUTH_ENABLED = Boolean(config.google.clientId && config.google.clientSecret && config.google.callbackUrl);

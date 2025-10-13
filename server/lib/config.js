@@ -22,11 +22,14 @@ const tiers = {
   },
 };
 
+const PROD_SUCCESS_REDIRECT = 'https://www.prismai-portfolio.com/';
+const PROD_FAILURE_REDIRECT = 'https://www.prismai-portfolio.com/login?error=oauth';
+
 const defaultSuccessRedirect = process.env.OAUTH_SUCCESS_REDIRECT
-  || (isProduction ? 'https://mrluca95.github.io/PrismAI/' : 'http://localhost:5173/dashboard');
+  || (isProduction ? PROD_SUCCESS_REDIRECT : 'http://localhost:5173/dashboard');
 
 const defaultFailureRedirect = process.env.OAUTH_FAILURE_REDIRECT
-  || (isProduction ? 'https://mrluca95.github.io/PrismAI/login?error=oauth' : 'http://localhost:5173/login?error=oauth');
+  || (isProduction ? PROD_FAILURE_REDIRECT : 'http://localhost:5173/login?error=oauth');
 
 export const config = {
   tiers,
