@@ -130,6 +130,24 @@ export async function FetchPriceDetails({ symbol, date, time, preferOpenAI = fal
     headers: { 'Content-Type': 'application/json' },
   });
 }
+
+export async function FetchPriceTimeline({ symbol, timeline = '1M' }) {
+  const normalizedSymbol = String(symbol || '').trim().toUpperCase();
+  if (!normalizedSymbol) {
+    throw new Error('symbol is required');
+  }
+
+  const timelineKey = String(timeline || '1M').toUpperCase();
+
+  if (!HAS_BACKEND) {
+    return fallbackFetchPriceTimeline({ symbol: normalizedSymbol, timeline: timelineKey });
+  }
+
+  return requestJson('/api/prices/history', {
+    body: JSON.stringify({ symbol: normalizedSymbol, timeline: timelineKey }),
+    headers: { 'Content-Type': 'application/json' },
+  });
+}
 export async function SearchSymbols(query = '') {
   const trimmed = String(query || '').trim();
   if (!trimmed) {
@@ -305,6 +323,58 @@ const fallbackFetchPriceDetails = async ({ symbol, date, time }) => {
     name: meta.name,
     type: meta.type,
     meta: { fallback: true },
+  };
+};
+const fallbackFetchPriceTimeline = async ({ symbol, timeline }) => {
+  await delay(80);
+  const upperSymbol = String(symbol || '').trim().toUpperCase();
+  const meta = symbolDirectory[upperSymbol] || { name: `${upperSymbol} Holdings`, type: 'stock' };
+  const basePrice = pseudoPrice(upperSymbol);
+  const timelineKey = String(timeline || '1M').toUpperCase();
+
+  const DAY_MS = 24 * 60 * 60 * 1000;
+  const startOfYear = new Date(new Date().getFullYear(), 0, 1).getTime();
+  const daysSinceYTD = Math.max(30, Math.floor((Date.now() - startOfYear) / DAY_MS));
+
+  const fallbackConfig = {
+    '1D': { points: 24, stepMs: DAY_MS / 24 },
+    '1W': { points: 7, stepMs: DAY_MS },
+    '1M': { points: 30, stepMs: DAY_MS },
+    '3M': { points: 90, stepMs: DAY_MS },
+    'YTD': { points: daysSinceYTD, stepMs: DAY_MS },
+    '1Y': { points: 52, stepMs: 7 * DAY_MS },
+    ALL: { points: 120, stepMs: 30 * DAY_MS },
+  };
+
+  const config = fallbackConfig[timelineKey] || fallbackConfig['1M'];
+  const series = [];
+  const nowMs = Date.now();
+
+  for (let index = config.points - 1; index >= 0; index -= 1) {
+    const timestamp = new Date(nowMs - index * config.stepMs);
+    const progress = (config.points - index) / Math.max(config.points, 1);
+    const drift = (progress - 0.5) * 0.08 * basePrice;
+    const noise = (Math.random() - 0.5) * 0.02 * basePrice;
+    const price = Math.max(0.01, basePrice + drift + noise);
+    series.push({
+      timestamp: timestamp.toISOString(),
+      close: Number(price.toFixed(2)),
+    });
+  }
+
+  return {
+    symbol: upperSymbol,
+    name: meta.name,
+    type: meta.type,
+    currency: 'USD',
+    timezone: 'UTC',
+    timeline: timelineKey,
+    series,
+    meta: {
+      provider: 'fallback',
+      range: timelineKey,
+      interval: config.stepMs,
+    },
   };
 };
 const fallbackBuildAssetDetail = (prompt) => {

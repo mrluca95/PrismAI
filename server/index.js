@@ -341,11 +341,44 @@ const sanitizeOpenAIError = (error, fallback = 'AI request failed.') => {
     || error?.body;
 
   if (typeof responseMessage === 'string' && responseMessage.trim().length > 0) {
-    message = responseMessage;
+    message = responseMessage.trim();
+  }
+
+  const bodyCandidates = [];
+  if (typeof error?.body === 'string' && error.body.trim().length > 0) {
+    bodyCandidates.push(error.body.trim());
+  }
+  const metadataRaw = error?.details?.error?.metadata?.raw;
+  if (typeof metadataRaw === 'string' && metadataRaw.trim().length > 0) {
+    bodyCandidates.push(metadataRaw.trim());
+  }
+
+  for (const raw of bodyCandidates) {
+    if (!raw) {
+      continue;
+    }
+    try {
+      const parsed = JSON.parse(raw);
+      const detail = typeof parsed?.detail === 'string' ? parsed.detail.trim() : '';
+      const title = typeof parsed?.title === 'string' ? parsed.title.trim() : '';
+      const nestedMessage = typeof parsed?.message === 'string' ? parsed.message.trim() : '';
+      const combined = detail ? (title ? title + ': ' + detail : detail) : (title || nestedMessage);
+      if (combined && combined.trim().length > 0) {
+        message = combined.trim();
+        break;
+      }
+    } catch (parseError) {
+      if (message === fallback || message === 'Provider returned error') {
+        message = raw;
+      }
+    }
   }
 
   if (typeof message === 'string') {
-    message = message.replace(/(sk|OPENAI|OPENROUTER)[-_A-Za-z0-9]+/g, '[redacted key]');
+    message = message.replace(/(sk|OPENAI|OPENROUTER)[-_A-Za-z0-9]+/g, '[redacted key]').trim();
+    if (message.length === 0) {
+      message = fallback;
+    }
   } else {
     message = fallback;
   }
@@ -353,10 +386,10 @@ const sanitizeOpenAIError = (error, fallback = 'AI request failed.') => {
   const providerLabel = error?.provider === 'openrouter' ? 'OpenRouter' : 'LLM provider';
 
   if (status === 401) {
-    return { status: 500, message: `${providerLabel} rejected the configured API key. Verify OPENAI_API_KEY or OPENROUTER_API_KEY on the server.` };
+    return { status: 500, message: providerLabel + ' rejected the configured API key. Verify OPENAI_API_KEY or OPENROUTER_API_KEY on the server.' };
   }
   if (status === 429) {
-    return { status: 429, message: `${providerLabel} rate limit hit. Please wait and retry.` };
+    return { status: 429, message: providerLabel + ' rate limit hit. Please wait and retry.' };
   }
 
   return { status: status || 502, message };
@@ -468,6 +501,18 @@ const priceHistoryCache = new Map();
 const priceHistoryInFlight = new Map();
 const priceIntradayCache = new Map();
 const priceIntradayInFlight = new Map();
+const priceTimelineCache = new Map();
+const PRICE_TIMELINE_TTL_MS = Number(process.env.PRICE_TIMELINE_TTL_MS || 1000 * 60 * 10);
+const PRICE_TIMELINE_SETTINGS = {
+  '1D': { range: '1d', interval: '5m', ttl: PRICE_INTRADAY_TTL_MS },
+  '1W': { range: '5d', interval: '30m', ttl: PRICE_INTRADAY_TTL_MS },
+  '1M': { range: '1mo', interval: '1d', ttl: PRICE_HISTORY_TTL_MS },
+  '3M': { range: '3mo', interval: '1d', ttl: PRICE_HISTORY_TTL_MS },
+  'YTD': { range: 'ytd', interval: '1d', ttl: PRICE_HISTORY_TTL_MS },
+  '1Y': { range: '1y', interval: '1wk', ttl: PRICE_HISTORY_TTL_MS },
+  ALL: { range: 'max', interval: '1mo', ttl: PRICE_HISTORY_TTL_MS },
+};
+
 
 const SYMBOL_SEARCH_TTL_MS = Number(process.env.SYMBOL_SEARCH_TTL_MS || 1000 * 60 * 10);
 const SYMBOL_SEARCH_MAX_RESULTS = Number(process.env.SYMBOL_SEARCH_MAX_RESULTS || 25);
@@ -2281,6 +2326,102 @@ app.post('/api/prices/details', requireAuth, async (req, res) => {
       return res.status(429).json({ error: error.message || 'External price API rate limit hit.' });
     }
     return res.status(502).json({ error: error.message || 'Failed to retrieve price information.' });
+  }
+});
+
+app.post('/api/prices/history', requireAuth, async (req, res) => {
+  const { symbol, timeline } = req.body || {};
+  if (!symbol) {
+    return res.status(400).json({ error: 'symbol is required' });
+  }
+
+  const normalizedSymbol = normalizeSymbol(symbol);
+  if (!normalizedSymbol) {
+    return res.status(400).json({ error: 'symbol is invalid' });
+  }
+
+  const timelineKey = String(timeline || '1M').toUpperCase();
+  const config = PRICE_TIMELINE_SETTINGS[timelineKey] || PRICE_TIMELINE_SETTINGS['1M'];
+
+  try {
+    const usage = await getUsage(req.user.id);
+    assertWithinQuota(req.user, usage);
+  } catch (error) {
+    const status = error.status || 429;
+    return res.status(status).json({ error: error.message || 'Price data quota exceeded for current billing period.' });
+  }
+
+  const cacheKey = normalizedSymbol + '::' + timelineKey;
+  const cached = priceTimelineCache.get(cacheKey);
+  if (cached && isCacheEntryFresh(cached, cached.ttl ?? PRICE_TIMELINE_TTL_MS)) {
+    try {
+      await consumeUsage(req.user, { quoteRequests: 1 });
+    } catch (usageError) {
+      const status = usageError.status || 429;
+      return res.status(status).json({ error: usageError.message || 'Price data quota exceeded for current billing period.' });
+    }
+    return res.json(cached.value);
+  }
+
+  try {
+    const resolvedEntry = await resolveYahooQuoteEntry(normalizedSymbol);
+    const entry = resolvedEntry?.entry;
+    const yahooSymbol = entry?.meta?.yahooSymbol
+      || resolvedEntry?.candidates?.[0]?.symbol
+      || yahooSymbolCache.get(normalizedSymbol);
+
+    if (!yahooSymbol) {
+      return res.status(404).json({ error: 'Unable to resolve symbol for chart data.' });
+    }
+
+    const chart = await fetchYahooChart(yahooSymbol, { range: config.range, interval: config.interval });
+    if (!chart) {
+      return res.status(404).json({ error: 'No chart data available for requested symbol.' });
+    }
+
+    const rawSeries = extractSeriesFromChart(chart) || [];
+    if (rawSeries.length === 0) {
+      return res.status(404).json({ error: 'No price history available for requested timeframe.' });
+    }
+
+    const series = rawSeries
+      .filter((point) => Number.isFinite(point?.close))
+      .map((point) => ({
+        timestamp: point.timestamp,
+        close: Number(point.close),
+      }));
+
+    const maxPoints = timelineKey === 'ALL' ? 1500 : 0;
+    const prunedSeries = maxPoints > 0 && series.length > maxPoints
+      ? series.slice(series.length - maxPoints)
+      : series;
+
+    const payload = {
+      symbol: normalizedSymbol,
+      name: entry?.meta?.name || normalizedSymbol,
+      type: entry?.meta?.type || null,
+      currency: entry?.value?.currency || chart?.meta?.currency || null,
+      timezone: chart?.meta?.timezone || null,
+      timeline: timelineKey,
+      series: prunedSeries,
+      meta: {
+        range: config.range,
+        interval: config.interval,
+        provider: 'yahoo',
+      },
+    };
+
+    priceTimelineCache.set(cacheKey, { value: payload, timestamp: nowMs(), ttl: config.ttl ?? PRICE_TIMELINE_TTL_MS });
+
+    await consumeUsage(req.user, { quoteRequests: 1 });
+
+    return res.json(payload);
+  } catch (error) {
+    if (error?.isRateLimit) {
+      return res.status(429).json({ error: error.message || 'External price API rate limit hit.' });
+    }
+    console.error('[server] price history error', error);
+    return res.status(error?.status || 502).json({ error: error?.message || 'Failed to retrieve price history.' });
   }
 });
 
