@@ -23,6 +23,9 @@ const MODEL = process.env.OPENAI_MODEL || 'gpt-4o-mini';
 const DEFAULT_SYSTEM_PROMPT = process.env.OPENAI_SYSTEM_PROMPT || 'You are Prism AI, an investment copilot. Provide concise, well-structured answers, and never fabricate data you cannot verify.';
 const OPENAI_MAX_OUTPUT_TOKENS = Number.isNaN(Number.parseInt(process.env.OPENAI_MAX_OUTPUT_TOKENS, 10)) ? 1500 : Number.parseInt(process.env.OPENAI_MAX_OUTPUT_TOKENS, 10);
 
+const YAHOO_RATE_LIMIT_COOLDOWN_MS = Number(process.env.YAHOO_RETRY_DELAY_MS || 60000);
+let yahooRateLimitedUntil = 0;
+
 const PgSession = connectPgSimple(session);
 
 const DEFAULT_ALLOWED_ORIGINS = [
@@ -362,12 +365,25 @@ const fetchYahooChart = async (symbol, { range = '1d', interval = '1m' } = {}) =
   if (!symbol) {
     return null;
   }
+  if (Date.now() < yahooRateLimitedUntil) {
+    const error = new Error('Yahoo chart rate limited');
+    error.isRateLimit = true;
+    throw error;
+  }
+
   const url = new URL(`https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbol)}`);
   url.searchParams.set('range', range);
   url.searchParams.set('interval', interval);
   url.searchParams.set('includePrePost', 'true');
 
   const response = await fetch(url, { headers: YAHOO_CHART_HEADERS });
+  if (response.status === 429) {
+    yahooRateLimitedUntil = Date.now() + YAHOO_RATE_LIMIT_COOLDOWN_MS;
+    const error = new Error('Yahoo chart responded with 429');
+    error.status = response.status;
+    error.isRateLimit = true;
+    throw error;
+  }
   if (!response.ok) {
     const error = new Error(`Yahoo chart responded with ${response.status}`);
     error.status = response.status;
@@ -376,12 +392,15 @@ const fetchYahooChart = async (symbol, { range = '1d', interval = '1m' } = {}) =
 
   const json = await response.json();
   if (json?.chart?.error) {
-    // Treat "Not Found" as a soft miss — return null so we can try alternatives.
     if (json.chart.error.code === 'Not Found') {
       return null;
     }
     const error = new Error(json.chart.error.description || 'Yahoo chart returned an error response.');
     error.code = json.chart.error.code;
+    if (String(error.code || '').toLowerCase().includes('rate')) {
+      yahooRateLimitedUntil = Date.now() + YAHOO_RATE_LIMIT_COOLDOWN_MS;
+      error.isRateLimit = true;
+    }
     throw error;
   }
 
@@ -398,6 +417,10 @@ const fetchYahooSymbolSearchPayload = async (query) => {
     return { symbols: [] };
   }
 
+  if (Date.now() < yahooRateLimitedUntil) {
+    return { symbols: [] };
+  }
+
   const normalized = trimmed.toLowerCase();
   const cached = symbolSearchCache.get(normalized);
   if (cached && Number.isFinite(SYMBOL_SEARCH_TTL_MS) && SYMBOL_SEARCH_TTL_MS > 0 && nowMs() - cached.timestamp < SYMBOL_SEARCH_TTL_MS) {
@@ -407,6 +430,13 @@ const fetchYahooSymbolSearchPayload = async (query) => {
   try {
     const url = `https://query1.finance.yahoo.com/v1/finance/search?q=${encodeURIComponent(trimmed)}&quotesCount=${SYMBOL_SEARCH_MAX_RESULTS}&newsCount=0&enableFuzzyQuery=false&lang=en-US&region=US`;
     const response = await fetch(url, { headers: YAHOO_CHART_HEADERS });
+    if (response.status === 429) {
+      yahooRateLimitedUntil = Date.now() + YAHOO_RATE_LIMIT_COOLDOWN_MS;
+      const error = new Error('Yahoo search responded with 429');
+      error.status = response.status;
+      error.isRateLimit = true;
+      throw error;
+    }
     if (!response.ok) {
       throw new Error(`Yahoo search responded with ${response.status}`);
     }
@@ -423,6 +453,9 @@ const fetchYahooSymbolSearchPayload = async (query) => {
     symbolSearchCache.set(normalized, { value: payload, timestamp: nowMs() });
     return payload;
   } catch (error) {
+    if (error?.isRateLimit) {
+      return { symbols: [] };
+    }
     console.warn(`[prices] yahoo symbol search failed for ${trimmed}`, error);
     return { symbols: [] };
   }
@@ -501,6 +534,7 @@ const resolveYahooQuoteEntry = async (symbol, options = {}) => {
 
   let selectedEntry = null;
   let selectedSymbol = null;
+  let rateLimited = false;
 
   for (const candidate of orderedCandidates) {
     try {
@@ -522,31 +556,13 @@ const resolveYahooQuoteEntry = async (symbol, options = {}) => {
       selectedSymbol = candidate.symbol;
       break;
     } catch (error) {
+      if (error?.isRateLimit) {
+        rateLimited = true;
+        break;
+      }
       console.warn(`[prices] yahoo chart failed for ${normalized} via ${candidate.symbol}`, error);
     }
   }
-
-  if (!selectedEntry) {
-    const fallbackCandidates = [];
-    const pushInfo = (sym, name, exchange) => {
-      const upper = String(sym || '').toUpperCase();
-      if (!upper || fallbackCandidates.some((item) => item.symbol === upper)) {
-        return;
-      }
-      fallbackCandidates.push({ symbol: upper, name: name || null, exchange: exchange || null });
-    };
-    if (metadata?.yahooSymbol) {
-      pushInfo(metadata.yahooSymbol, metadata.name, null);
-    }
-    searchCandidates.forEach((item) => pushInfo(item.symbol, item.name, item.exchange));
-    if (fallbackCandidates.length === 0) {
-      return null;
-    }
-    return { entry: null, candidates: fallbackCandidates };
-  }
-
-  yahooSymbolCache.set(normalized, selectedSymbol);
-  selectedEntry.meta = { ...(selectedEntry.meta || {}), yahooSymbol: selectedSymbol };
 
   const candidatesInfo = [];
   const pushCandidateInfo = (sym, name, exchange) => {
@@ -557,14 +573,27 @@ const resolveYahooQuoteEntry = async (symbol, options = {}) => {
     candidatesInfo.push({ symbol: upper, name: name || null, exchange: exchange || null });
   };
 
-  pushCandidateInfo(selectedSymbol, selectedEntry.meta?.name || null, selectedEntry.meta?.exchange || null);
+  if (selectedEntry && selectedSymbol) {
+    yahooSymbolCache.set(normalized, selectedSymbol);
+    selectedEntry.meta = { ...(selectedEntry.meta || {}), yahooSymbol: selectedSymbol };
+    pushCandidateInfo(selectedSymbol, selectedEntry.meta?.name || null, selectedEntry.meta?.exchange || null);
+  }
+
   if (metadata?.yahooSymbol) {
     pushCandidateInfo(metadata.yahooSymbol, metadata.name, null);
   }
   searchCandidates.forEach((item) => pushCandidateInfo(item.symbol, item.name, item.exchange));
 
-  selectedEntry.candidates = candidatesInfo.slice(0, 8);
-  return { entry: selectedEntry, candidates: selectedEntry.candidates };
+  if (selectedEntry) {
+    selectedEntry.candidates = candidatesInfo.slice(0, 8);
+    return { entry: selectedEntry, candidates: selectedEntry.candidates, rateLimited };
+  }
+
+  if (candidatesInfo.length === 0) {
+    return rateLimited ? { entry: null, candidates: [], rateLimited: true } : null;
+  }
+
+  return { entry: null, candidates: candidatesInfo.slice(0, 8), rateLimited };
 };
 const extractSeriesFromChart = (chartResult) => {
   if (!chartResult) {
@@ -1090,23 +1119,30 @@ const resolvePriceQuote = async (symbol, options = {}) => {
   const request = (async () => {
     let entry = null;
     let candidateList = [];
+    let rateLimited = false;
     try {
       const resolved = await resolveYahooQuoteEntry(cacheKey, { expectedName });
       if (resolved?.entry) {
         entry = resolved.entry;
         candidateList = resolved.candidates || [];
-      } else if (resolved?.candidates?.length) {
-        candidateList = resolved.candidates;
+        rateLimited = Boolean(resolved?.rateLimited);
+      } else if (resolved) {
+        candidateList = resolved.candidates || [];
+        rateLimited = Boolean(resolved.rateLimited);
       }
     } catch (error) {
-      console.warn(`[prices] yahoo quote resolution failed for ${cacheKey}`, error);
+      if (error?.isRateLimit) {
+        rateLimited = true;
+      } else {
+        console.warn(`[prices] yahoo quote resolution failed for ${cacheKey}`, error);
+      }
     }
 
     if (!isValidQuoteEntry(entry)) {
       entry = await buildStooqQuoteEntry(cacheKey);
     }
 
-    if (preferOpenAI && !isValidQuoteEntry(entry)) {
+    if ((preferOpenAI || rateLimited) && !isValidQuoteEntry(entry)) {
       const openAIEntry = await fetchPriceFromOpenAI(cacheKey);
       if (openAIEntry) {
         entry = openAIEntry;
@@ -1813,6 +1849,8 @@ app.post('/api/prices/details', requireAuth, async (req, res) => {
     const now = new Date();
     let currentPrice = Number(quoteEntry?.value?.price);
     let currentPriceTimestamp = quoteEntry?.value?.timestamp || null;
+    let currentOpen = Number(quoteEntry?.value?.open);
+    let previousClose = Number(quoteEntry?.value?.previousClose);
     let priceSource = quoteEntry?.source || null;
     if (quoteEntry?.meta?.name && !resolvedName) {
       resolvedName = quoteEntry.meta.name;

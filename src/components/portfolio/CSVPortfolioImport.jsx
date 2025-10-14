@@ -166,7 +166,7 @@ export default function CSVPortfolioImport({ onSuccess }) {
         }
         const fetchedHistorical = Number(priceDetails?.historical_price);
         if (!Number.isFinite(assetPayload.purchase_price) || assetPayload.purchase_price === 0) {
-          const fallbackPurchase = Number.isFinite(fetchedHistorical) ? fetchedHistorical : fetchedCurrent;
+          const fallbackPurchase = Number.isFinite(fetchedCurrent) ? fetchedCurrent : fetchedHistorical;
           if (Number.isFinite(fallbackPurchase)) {
             assetPayload.purchase_price = fallbackPurchase;
           }
