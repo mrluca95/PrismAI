@@ -37,6 +37,64 @@ const FALLBACK_SECTOR_BY_TYPE = {
   etf: "Exchange Traded Funds",
 };
 
+const ETF_SECTOR_BREAKDOWN = {
+  VOO: {
+    Technology: 0.28,
+    "Healthcare": 0.13,
+    "Financial Services": 0.12,
+    "Consumer Discretionary": 0.10,
+    Industrials: 0.08,
+    "Communication Services": 0.08,
+    "Consumer Staples": 0.06,
+    Energy: 0.04,
+    Utilities: 0.03,
+    "Real Estate": 0.03,
+    Materials: 0.03,
+  },
+  SPY: {
+    Technology: 0.28,
+    "Healthcare": 0.13,
+    "Financial Services": 0.12,
+    "Consumer Discretionary": 0.10,
+    Industrials: 0.08,
+    "Communication Services": 0.08,
+    "Consumer Staples": 0.06,
+    Energy: 0.04,
+    Utilities: 0.03,
+    "Real Estate": 0.03,
+    Materials: 0.03,
+  },
+  VTI: {
+    Technology: 0.26,
+    "Healthcare": 0.14,
+    "Financial Services": 0.12,
+    "Consumer Discretionary": 0.11,
+    Industrials: 0.10,
+    "Communication Services": 0.08,
+    "Consumer Staples": 0.06,
+    Energy: 0.04,
+    Utilities: 0.03,
+    Materials: 0.03,
+    "Real Estate": 0.03,
+  },
+  QQQ: {
+    Technology: 0.57,
+    "Consumer Discretionary": 0.17,
+    "Communication Services": 0.15,
+    "Healthcare": 0.05,
+    Industrials: 0.03,
+    "Consumer Staples": 0.03,
+  },
+  ARKK: {
+    Technology: 0.45,
+    "Healthcare": 0.23,
+    "Communication Services": 0.11,
+    Industrials: 0.09,
+    "Consumer Discretionary": 0.07,
+    "Financial Services": 0.05,
+  },
+};
+
 const normalizeDirectSector = (value) => {
   const trimmed = (value || "").toString().trim();
   if (!trimmed) {
@@ -90,6 +148,18 @@ const inferSector = (asset = {}) => {
   return "Other";
 };
 
+const addContribution = (map, sector, amount, symbol) => {
+  const name = sector || "Other";
+  if (!map.has(name)) {
+    map.set(name, { name, value: 0, symbols: new Set() });
+  }
+  const entry = map.get(name);
+  entry.value += amount;
+  if (symbol) {
+    entry.symbols.add(symbol);
+  }
+};
+
 export default function SectorAllocation({ assets, isLoading }) {
   const { format, convert } = useCurrency();
 
@@ -104,21 +174,46 @@ export default function SectorAllocation({ assets, isLoading }) {
     );
   }
 
-  const sectorTotals = assets.reduce((acc, asset) => {
-    const sector = inferSector(asset);
-    const marketValue = Number(asset?.market_value) || 0;
-
-    if (!acc.has(sector)) {
-      acc.set(sector, { name: sector, value: 0, assets: 0 });
+  const sectorTotals = assets.reduce((acc, asset = {}) => {
+    const marketValue = Number(asset.market_value) || 0;
+    if (marketValue <= 0) {
+      return acc;
     }
 
-    const entry = acc.get(sector);
-    entry.value += marketValue;
-    entry.assets += 1;
+    const symbol = (asset.symbol || "").toUpperCase();
+    const breakdown = ETF_SECTOR_BREAKDOWN[symbol];
+
+    if ((asset.type || "").toLowerCase() === "etf" && breakdown) {
+      let distributed = 0;
+      Object.entries(breakdown).forEach(([sectorName, weight]) => {
+        const normalizedWeight = Math.max(Number(weight) || 0, 0);
+        if (normalizedWeight <= 0) {
+          return;
+        }
+        const contribution = marketValue * normalizedWeight;
+        if (contribution <= 0) {
+          return;
+        }
+        addContribution(acc, sectorName, contribution, symbol);
+        distributed += contribution;
+      });
+
+      const remainder = marketValue - distributed;
+      if (remainder > 0.01) {
+        addContribution(acc, inferSector(asset), remainder, symbol);
+      }
+      return acc;
+    }
+
+    addContribution(acc, inferSector(asset), marketValue, symbol);
     return acc;
   }, new Map());
 
-  const rawEntries = Array.from(sectorTotals.values());
+  const rawEntries = Array.from(sectorTotals.values()).map((entry) => ({
+    name: entry.name,
+    value: entry.value,
+    assets: entry.symbols.size,
+  }));
   const hasPositiveValues = rawEntries.some((item) => item.value > 0);
   const sourceData = hasPositiveValues ? rawEntries.filter((item) => item.value > 0) : rawEntries;
 

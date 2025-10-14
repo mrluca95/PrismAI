@@ -1757,8 +1757,8 @@ app.post('/api/upload', requireAuth, upload.single('file'), async (req, res) => 
 
 
 app.post('/api/extract', requireAuth, async (req, res) => {
-  if (!openaiClient) {
-    return res.status(500).json({ error: 'OPENAI_API_KEY is not configured on the server.' });
+  if (!openaiClient && !OPENROUTER_ENABLED) {
+    return res.status(500).json({ error: 'No AI provider is configured on the server.' });
   }
 
   const { file_url: fileId, json_schema: schema } = req.body || {};
@@ -1782,6 +1782,14 @@ app.post('/api/extract', requireAuth, async (req, res) => {
     return res.status(404).json({ error: 'Uploaded file not found. Upload a new file and retry.' });
   }
 
+  const isImage = record.mimeType?.startsWith('image/');
+  if (isImage && !openaiClient) {
+    return res.status(500).json({ error: 'OPENAI_API_KEY is required for image extraction.' });
+  }
+  if (!isImage && !OPENROUTER_ENABLED) {
+    return res.status(500).json({ error: 'OpenRouter is not configured for document extraction.' });
+  }
+
   const sendSuccess = async (payload) => {
     uploadStore.delete(fileId);
     try {
@@ -1794,7 +1802,7 @@ app.post('/api/extract', requireAuth, async (req, res) => {
   };
 
   try {
-    if (record.mimeType?.startsWith('image/')) {
+    if (isImage) {
       const instructions = [
         'Extract all visible holdings from the provided portfolio screenshot.',
         'Return JSON that strictly matches the supplied schema.',
@@ -1839,9 +1847,10 @@ app.post('/api/extract', requireAuth, async (req, res) => {
         if (repaired) {
           return sendSuccess(repaired);
         }
-        console.error('[server] Failed to parse JSON response from OpenAI', content);
         const error = new Error('Model returned invalid JSON');
         error.raw = content;
+        error.provider = 'openai';
+        console.error('[server] Failed to parse JSON response from OpenAI', content);
         throw error;
       }
       return sendSuccess(structured);
@@ -1858,8 +1867,7 @@ app.post('/api/extract', requireAuth, async (req, res) => {
       '---',
     ].join('\n');
 
-    const response = await openaiClient.chat.completions.create({
-      model: MODEL,
+    const chatOptions = {
       temperature: 0.1,
       top_p: 0.6,
       presence_penalty: 0,
@@ -1876,7 +1884,9 @@ app.post('/api/extract', requireAuth, async (req, res) => {
         { role: 'system', content: 'You are an assistant that extracts investment data and returns JSON strictly matching the provided schema.' },
         { role: 'user', content: prompt },
       ],
-    });
+    };
+
+    const response = await requestOpenRouterChatCompletion(chatOptions);
 
     const structured = extractJsonFromResponse(response);
     if (!structured) {
@@ -1885,9 +1895,10 @@ app.post('/api/extract', requireAuth, async (req, res) => {
       if (repaired) {
         return sendSuccess(repaired);
       }
-      console.error('[server] Failed to parse JSON response from OpenAI', content);
       const error = new Error('Model returned invalid JSON');
       error.raw = content;
+      error.provider = 'openrouter';
+      console.error('[server] Failed to parse JSON response from OpenRouter', content);
       throw error;
     }
     return sendSuccess(structured);
