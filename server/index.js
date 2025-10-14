@@ -31,6 +31,100 @@ const OPENROUTER_TIMEOUT_MS = Number.isNaN(OPENROUTER_TIMEOUT_RAW) ? 15000 : OPE
 const OPENROUTER_BASE_URL = process.env.OPENROUTER_BASE_URL || 'https://openrouter.ai/api/v1/chat/completions';
 const OPENROUTER_ENABLED = Boolean(OPENROUTER_API_KEY);
 
+const sanitizeSchemaNullable = (node) => {
+  if (Array.isArray(node)) {
+    return node.map((entry) => sanitizeSchemaNullable(entry));
+  }
+  if (!node || typeof node !== 'object') {
+    return node;
+  }
+
+  const result = { ...node };
+
+  if (Object.prototype.hasOwnProperty.call(result, 'nullable')) {
+    const nullable = result.nullable;
+    delete result.nullable;
+
+    if (nullable) {
+      const currentType = result.type;
+      if (Array.isArray(currentType)) {
+        if (!currentType.includes('null')) {
+          result.type = [...currentType, 'null'];
+        }
+      } else if (typeof currentType === 'string') {
+        result.type = [currentType, 'null'];
+      } else if (currentType === undefined) {
+        result.type = ['null'];
+      }
+    }
+  }
+
+  if (result.properties && typeof result.properties === 'object') {
+    const next = {};
+    for (const [key, value] of Object.entries(result.properties)) {
+      next[key] = sanitizeSchemaNullable(value);
+    }
+    result.properties = next;
+  }
+  if (result.patternProperties && typeof result.patternProperties === 'object') {
+    const next = {};
+    for (const [key, value] of Object.entries(result.patternProperties)) {
+      next[key] = sanitizeSchemaNullable(value);
+    }
+    result.patternProperties = next;
+  }
+  if (result.definitions && typeof result.definitions === 'object') {
+    const next = {};
+    for (const [key, value] of Object.entries(result.definitions)) {
+      next[key] = sanitizeSchemaNullable(value);
+    }
+    result.definitions = next;
+  }
+  if (result.$defs && typeof result.$defs === 'object') {
+    const next = {};
+    for (const [key, value] of Object.entries(result.$defs)) {
+      next[key] = sanitizeSchemaNullable(value);
+    }
+    result.$defs = next;
+  }
+  if (result.dependentSchemas && typeof result.dependentSchemas === 'object') {
+    const next = {};
+    for (const [key, value] of Object.entries(result.dependentSchemas)) {
+      next[key] = sanitizeSchemaNullable(value);
+    }
+    result.dependentSchemas = next;
+  }
+
+  if (result.items) {
+    result.items = sanitizeSchemaNullable(result.items);
+  }
+  if (Array.isArray(result.anyOf)) {
+    result.anyOf = result.anyOf.map((value) => sanitizeSchemaNullable(value));
+  }
+  if (Array.isArray(result.oneOf)) {
+    result.oneOf = result.oneOf.map((value) => sanitizeSchemaNullable(value));
+  }
+  if (Array.isArray(result.allOf)) {
+    result.allOf = result.allOf.map((value) => sanitizeSchemaNullable(value));
+  }
+
+  return result;
+};
+
+const sanitizeResponseFormatForOpenRouter = (responseFormat) => {
+  if (!responseFormat || responseFormat.type !== 'json_schema') {
+    return responseFormat;
+  }
+  const sanitized = { ...responseFormat };
+  if (sanitized.json_schema && typeof sanitized.json_schema === 'object') {
+    sanitized.json_schema = { ...sanitized.json_schema };
+    if (sanitized.json_schema.schema) {
+      sanitized.json_schema.schema = sanitizeSchemaNullable(sanitized.json_schema.schema);
+    }
+  }
+  return sanitized;
+};
+
 const YAHOO_RATE_LIMIT_COOLDOWN_MS = Number(process.env.YAHOO_RETRY_DELAY_MS || 60000);
 let yahooRateLimitedUntil = 0;
 
@@ -292,19 +386,45 @@ const requestOpenRouterChatCompletion = async (body) => {
       headers['X-Title'] = OPENROUTER_SITE_NAME;
     }
 
+    const payload = {
+      ...body,
+      model: OPENROUTER_MODEL,
+    };
+    if (payload.response_format) {
+      payload.response_format = sanitizeResponseFormatForOpenRouter(payload.response_format);
+    }
+
     const response = await fetch(OPENROUTER_BASE_URL, {
       method: 'POST',
       headers,
-      body: JSON.stringify({ ...body, model: OPENROUTER_MODEL }),
+      body: JSON.stringify(payload),
       signal: controller.signal,
     });
 
     if (!response.ok) {
-      const payload = await response.text();
-      const error = new Error(`OpenRouter request failed with status ${response.status}`);
+      const payloadText = await response.text();
+      let derivedMessage = `OpenRouter request failed with status ${response.status}`;
+      let parsed = null;
+      try {
+        parsed = JSON.parse(payloadText);
+      } catch (parseError) {
+        parsed = null;
+      }
+      const providerMessage = parsed?.error?.message
+        || parsed?.error
+        || parsed?.detail
+        || parsed?.metadata?.raw
+        || null;
+      if (typeof providerMessage === 'string' && providerMessage.trim().length > 0) {
+        derivedMessage = providerMessage.trim();
+      }
+      const error = new Error(derivedMessage);
       error.status = response.status;
-      error.body = payload;
+      error.body = parsed?.metadata?.raw || payloadText;
       error.provider = 'openrouter';
+      if (parsed) {
+        error.details = parsed;
+      }
       throw error;
     }
 
