@@ -3,6 +3,7 @@ import React, { useState, useEffect, useMemo, useCallback } from 'react';
 import { Transaction } from '@/entities/Transaction';
 import { Asset } from '@/entities/Asset';
 import { FetchPriceDetails, SearchSymbols, InvokeLLM, FetchQuotes } from '@/integrations/Core';
+import { promptSymbolChoice } from '@/utils/promptSymbolChoice';
 import { Loader2, Search } from 'lucide-react';
 import { debounce } from 'lodash';
 import AutocompleteInput from '../ui/AutocompleteInput';
@@ -213,13 +214,31 @@ export default function TransactionForm({ assets, onSuccess, onCancel }) {
       const existingAsset = assets.find((asset) => asset.symbol === symbol);
 
       try {
-        const result = await FetchPriceDetails({ symbol, date, time });
+        let activeSymbol = symbol;
+        const directoryMeta = symbolDirectory[symbol] || {};
+        const expectedName = existingAsset?.name || directoryMeta.name || '';
+        let result = await FetchPriceDetails({ symbol: activeSymbol, date, time, expectedName });
+        const candidates = result?.metadata?.candidates || [];
+        const responseName = (result?.name || result?.metadata?.name || '').toLowerCase();
+        const normalisedExpected = expectedName.toLowerCase();
+        const needsConfirmation = candidates.length > 1 && normalisedExpected && responseName && !responseName.includes(normalisedExpected);
+
+        if (needsConfirmation || candidates.length > 1) {
+          const choice = await promptSymbolChoice(activeSymbol, expectedName, candidates);
+          if (choice && choice.symbol && choice.symbol !== activeSymbol) {
+            activeSymbol = choice.symbol;
+            result = await FetchPriceDetails({ symbol: activeSymbol, date, time, expectedName: choice.name || expectedName });
+            setFormData((prev) => ({ ...prev, asset_symbol: activeSymbol }));
+          }
+        }
+
         const historical = Number(result?.historical_price);
         const current = Number(result?.current_price);
         if (Number.isFinite(historical) && Number.isFinite(current)) {
-          const directoryMeta = symbolDirectory[symbol] || {};
-          const resolvedName = result.name || existingAsset?.name || directoryMeta.name || symbol;
-          const resolvedType = result.type || existingAsset?.type || directoryMeta.type || 'stock';
+          const updatedDirectoryMeta = symbolDirectory[activeSymbol] || directoryMeta;
+          const updatedExisting = assets.find((asset) => asset.symbol === activeSymbol) || existingAsset;
+          const resolvedName = result.name || updatedExisting?.name || updatedDirectoryMeta.name || activeSymbol;
+          const resolvedType = result.type || updatedExisting?.type || updatedDirectoryMeta.type || 'stock';
 
           setFetchedAssetInfo({
             historical_price: historical,

@@ -428,70 +428,144 @@ const fetchYahooSymbolSearchPayload = async (query) => {
   }
 };
 
-const resolveYahooQuoteEntry = async (symbol) => {
+const resolveYahooQuoteEntry = async (symbol, options = {}) => {
   const normalized = normalizeSymbol(symbol);
   if (!normalized) {
     return null;
   }
 
+  const expectedName = String(options.expectedName || '').trim().toLowerCase();
   const metadata = KNOWN_SYMBOL_META.get(normalized) || null;
-  const candidates = [];
+
+  const candidateMap = new Map();
+  const registerCandidate = (symbolValue, extra = {}) => {
+    const cleaned = String(symbolValue || '').trim();
+    if (!cleaned) {
+      return;
+    }
+    const upper = cleaned.toUpperCase();
+    const existing = candidateMap.get(upper) || { symbol: upper, score: 0, name: null, exchange: null };
+    if (Number.isFinite(extra.score)) {
+      existing.score = Math.max(existing.score, extra.score);
+    }
+    if (extra.name && !existing.name) {
+      existing.name = extra.name;
+    }
+    if (extra.exchange && !existing.exchange) {
+      existing.exchange = extra.exchange;
+    }
+    candidateMap.set(upper, existing);
+  };
+
   if (metadata?.yahooSymbol) {
-    candidates.push(metadata.yahooSymbol);
+    registerCandidate(metadata.yahooSymbol, { score: 100, name: metadata.name || null });
   }
+
   const cachedSymbol = yahooSymbolCache.get(normalized);
   if (cachedSymbol) {
-    candidates.push(cachedSymbol);
+    registerCandidate(cachedSymbol, { score: 80 });
   }
-  candidates.push(...buildYahooSymbolCandidates(normalized));
 
-  const attempted = new Set();
-  for (const candidate of candidates) {
-    const key = String(candidate || '').trim();
-    if (!key || attempted.has(key)) {
-      continue;
+  buildYahooSymbolCandidates(normalized).forEach((candidate) => registerCandidate(candidate, { score: 40 }));
+
+  let searchPayload = null;
+  try {
+    searchPayload = await fetchYahooSymbolSearchPayload(normalized);
+  } catch (error) {
+    console.warn(`[prices] yahoo symbol search failed for ${normalized}`, error);
+  }
+
+  const searchCandidates = (searchPayload?.symbols || []).map((match, index) => {
+    const sym = String(match?.symbol || '').toUpperCase();
+    const name = match?.name || '';
+    const exchange = match?.exchange || match?.exchDisp || '';
+    let score = 60 - index;
+    const nameLower = name.toLowerCase();
+    if (expectedName) {
+      if (nameLower === expectedName) {
+        score += 80;
+      } else if (nameLower.includes(expectedName) || expectedName.includes(nameLower)) {
+        score += 40;
+      }
     }
-    attempted.add(key);
+    if (metadata?.name && metadata.name.toLowerCase() === nameLower) {
+      score += 40;
+    }
+    registerCandidate(sym, { score, name, exchange });
+    return { symbol: sym, name, exchange };
+  });
+
+  const orderedCandidates = Array.from(candidateMap.values())
+    .filter((candidate) => candidate.symbol)
+    .sort((a, b) => b.score - a.score);
+
+  let selectedEntry = null;
+  let selectedSymbol = null;
+
+  for (const candidate of orderedCandidates) {
     try {
-      const chartResult = await fetchYahooChart(key);
+      const chartResult = await fetchYahooChart(candidate.symbol);
       if (!chartResult) {
         continue;
       }
-      const entry = buildYahooQuoteEntry(normalized, key, chartResult);
-      if (entry) {
-        yahooSymbolCache.set(normalized, key);
-        return { entry, chart: chartResult };
-      }
-    } catch (error) {
-      console.warn(`[prices] yahoo chart failed for ${normalized} via ${key}`, error);
-    }
-  }
-
-  const searchPayload = await fetchYahooSymbolSearchPayload(normalized);
-  for (const match of searchPayload.symbols || []) {
-    const key = String(match?.symbol || '').toUpperCase();
-    if (!key || attempted.has(key)) {
-      continue;
-    }
-    attempted.add(key);
-    try {
-      const chartResult = await fetchYahooChart(key);
-      if (!chartResult) {
+      const entry = buildYahooQuoteEntry(normalized, candidate.symbol, chartResult);
+      if (!entry) {
         continue;
       }
-      const entry = buildYahooQuoteEntry(normalized, key, chartResult);
-      if (entry) {
-        yahooSymbolCache.set(normalized, key);
-        return { entry, chart: chartResult };
+      if (candidate.name) {
+        entry.meta = { ...(entry.meta || {}), name: candidate.name, type: entry.meta?.type || metadata?.type || null };
       }
+      if (candidate.exchange && !entry.meta?.exchange) {
+        entry.meta = { ...(entry.meta || {}), exchange: candidate.exchange };
+      }
+      selectedEntry = entry;
+      selectedSymbol = candidate.symbol;
+      break;
     } catch (error) {
-      console.warn(`[prices] yahoo chart failed for ${normalized} via search symbol ${key}`, error);
+      console.warn(`[prices] yahoo chart failed for ${normalized} via ${candidate.symbol}`, error);
     }
   }
 
-  return null;
+  if (!selectedEntry) {
+    const fallbackCandidates = [];
+    const pushInfo = (sym, name, exchange) => {
+      const upper = String(sym || '').toUpperCase();
+      if (!upper || fallbackCandidates.some((item) => item.symbol === upper)) {
+        return;
+      }
+      fallbackCandidates.push({ symbol: upper, name: name || null, exchange: exchange || null });
+    };
+    if (metadata?.yahooSymbol) {
+      pushInfo(metadata.yahooSymbol, metadata.name, null);
+    }
+    searchCandidates.forEach((item) => pushInfo(item.symbol, item.name, item.exchange));
+    if (fallbackCandidates.length === 0) {
+      return null;
+    }
+    return { entry: null, candidates: fallbackCandidates };
+  }
+
+  yahooSymbolCache.set(normalized, selectedSymbol);
+  selectedEntry.meta = { ...(selectedEntry.meta || {}), yahooSymbol: selectedSymbol };
+
+  const candidatesInfo = [];
+  const pushCandidateInfo = (sym, name, exchange) => {
+    const upper = String(sym || '').toUpperCase();
+    if (!upper || candidatesInfo.some((item) => item.symbol === upper)) {
+      return;
+    }
+    candidatesInfo.push({ symbol: upper, name: name || null, exchange: exchange || null });
+  };
+
+  pushCandidateInfo(selectedSymbol, selectedEntry.meta?.name || null, selectedEntry.meta?.exchange || null);
+  if (metadata?.yahooSymbol) {
+    pushCandidateInfo(metadata.yahooSymbol, metadata.name, null);
+  }
+  searchCandidates.forEach((item) => pushCandidateInfo(item.symbol, item.name, item.exchange));
+
+  selectedEntry.candidates = candidatesInfo.slice(0, 8);
+  return { entry: selectedEntry, candidates: selectedEntry.candidates };
 };
-
 const extractSeriesFromChart = (chartResult) => {
   if (!chartResult) {
     return [];
@@ -702,6 +776,8 @@ const KNOWN_SYMBOL_META = new Map([
   ['AMZN', { name: 'Amazon.com, Inc.', type: 'stock' }],
   ['TSLA', { name: 'Tesla, Inc.', type: 'stock' }],
   ['META', { name: 'Meta Platforms, Inc.', type: 'stock' }],
+  ['IAG', { name: 'IAMGOLD Corporation', type: 'stock', yahooSymbol: 'IAG.TO' }],
+  ['NESN', { name: 'Nestlé S.A.', type: 'stock', yahooSymbol: 'NESN.SW' }],
   ['NVDA', { name: 'NVIDIA Corporation', type: 'stock' }],
   ['NFLX', { name: 'Netflix, Inc.', type: 'stock' }],
   ['SPY', { name: 'SPDR S&P 500 ETF Trust', type: 'etf' }],
@@ -944,7 +1020,7 @@ const resolveYahooHistoricalPrice = async (symbol, targetDateTime) => {
   }
 
   try {
-    const resolved = await resolveYahooQuoteEntry(normalized);
+    const resolved = await resolveYahooQuoteEntry(normalized, { expectedName: metadata?.name || null });
     const yahooSymbol = resolved?.entry?.meta?.yahooSymbol || yahooSymbolCache.get(normalized);
     if (!yahooSymbol) {
       return null;
@@ -999,7 +1075,7 @@ const isValidQuoteEntry = (entry) => Boolean(entry && Number.isFinite(entry?.val
 
 const resolvePriceQuote = async (symbol, options = {}) => {
   const cacheKey = normalizeSymbol(symbol);
-  const { preferOpenAI = false } = options;
+  const { preferOpenAI = false, expectedName = null } = options;
 
   const cached = priceCache.get(cacheKey);
   if (isCacheEntryFresh(cached, PRICE_CACHE_TTL_MS)) {
@@ -1013,10 +1089,14 @@ const resolvePriceQuote = async (symbol, options = {}) => {
 
   const request = (async () => {
     let entry = null;
+    let candidateList = [];
     try {
-      const resolved = await resolveYahooQuoteEntry(cacheKey);
+      const resolved = await resolveYahooQuoteEntry(cacheKey, { expectedName });
       if (resolved?.entry) {
         entry = resolved.entry;
+        candidateList = resolved.candidates || [];
+      } else if (resolved?.candidates?.length) {
+        candidateList = resolved.candidates;
       }
     } catch (error) {
       console.warn(`[prices] yahoo quote resolution failed for ${cacheKey}`, error);
@@ -1033,9 +1113,14 @@ const resolvePriceQuote = async (symbol, options = {}) => {
       }
     }
 
-    if (entry && PRICE_CACHE_TTL_MS > 0) {
-      priceCache.set(cacheKey, entry);
-      pruneCache(priceCache, PRICE_CACHE_MAX_ENTRIES);
+    if (entry) {
+      if (candidateList.length && !entry.candidates) {
+        entry.candidates = candidateList;
+      }
+      if (PRICE_CACHE_TTL_MS > 0) {
+        priceCache.set(cacheKey, entry);
+        pruneCache(priceCache, PRICE_CACHE_MAX_ENTRIES);
+      }
     }
     return entry;
   })();
@@ -1674,12 +1759,13 @@ app.post('/api/extract', requireAuth, async (req, res) => {
 
 
 app.post('/api/prices/details', requireAuth, async (req, res) => {
-  const { symbol, date, time, prefer_openai } = req.body || {};
+  const { symbol, date, time, prefer_openai, expected_name } = req.body || {};
   if (!symbol) {
     return res.status(400).json({ error: 'symbol is required' });
   }
 
   const preferOpenAI = Boolean(prefer_openai);
+  const expectedNameOverride = typeof expected_name === 'string' ? expected_name : null;
   const normalizedSymbol = normalizeSymbol(symbol);
   const metadata = KNOWN_SYMBOL_META.get(normalizedSymbol) || null;
   let resolvedName = metadata?.name || null;
@@ -1715,7 +1801,7 @@ app.post('/api/prices/details', requireAuth, async (req, res) => {
   try {
     let quoteEntry = null;
     try {
-      quoteEntry = await resolvePriceQuote(normalizedSymbol, { preferOpenAI });
+      quoteEntry = await resolvePriceQuote(normalizedSymbol, { preferOpenAI, expectedName: expectedNameOverride || resolvedName || metadata?.name || null });
     } catch (quoteError) {
       if (quoteError?.isRateLimit || quoteError?.status) {
         console.warn(`[prices] primary quote provider unavailable for ${normalizedSymbol}`, quoteError);
@@ -2016,6 +2102,13 @@ app.post('/api/prices', requireAuth, async (req, res) => {
 app.listen(PORT, () => {
   console.log(`[server] Prism AI backend listening on http://localhost:${PORT}`);
 });
+
+
+
+
+
+
+
 
 
 

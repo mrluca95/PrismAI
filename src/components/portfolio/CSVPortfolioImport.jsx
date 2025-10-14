@@ -4,6 +4,7 @@ import { Upload, File, Loader2, CheckCircle, AlertTriangle } from 'lucide-react'
 import { UploadFile, ExtractDataFromUploadedFile, FetchPriceDetails } from '@/integrations/Core';
 import { Asset } from '@/entities/Asset';
 import AutocompleteInput from '../ui/AutocompleteInput';
+import { promptSymbolChoice } from '@/utils/promptSymbolChoice';
 
 export default function CSVPortfolioImport({ onSuccess }) {
   const [file, setFile] = useState(null);
@@ -117,40 +118,68 @@ export default function CSVPortfolioImport({ onSuccess }) {
       let updatedCount = 0;
 
       for (const extractedAsset of extractedData.assets) {
-        const existingAsset = existingAssets.find(a => a.symbol === extractedAsset.symbol && a.broker === brokerName.trim());
-        const assetPayload = {
-          ...extractedAsset,
-          broker: brokerName.trim(),
-          purchase_price: extractedAsset.purchase_price || extractedAsset.current_price,
+        const today = new Date();
+        const dateString = today.toISOString().slice(0, 10);
+        let resolvedSymbol = extractedAsset.symbol;
+        let resolvedName = extractedAsset.name || extractedAsset.symbol;
+        let priceDetails = null;
+
+        const fetchDetailsForSymbol = async (symbolToFetch, expectedName = '') => {
+          return FetchPriceDetails({
+            symbol: symbolToFetch,
+            date: dateString,
+            preferOpenAI: true,
+            expectedName,
+          });
         };
 
         try {
-          const today = new Date();
-          const priceDetails = await FetchPriceDetails({
-            symbol: extractedAsset.symbol,
-            date: today.toISOString().slice(0, 10),
-            preferOpenAI: true,
-          });
-          const fetchedCurrent = Number(priceDetails?.current_price);
-          if (Number.isFinite(fetchedCurrent)) {
-            assetPayload.current_price = fetchedCurrent;
-          }
-          const fetchedHistorical = Number(priceDetails?.historical_price);
-          if (!Number.isFinite(assetPayload.purchase_price) || assetPayload.purchase_price === 0) {
-            const fallbackPurchase = Number.isFinite(fetchedHistorical) ? fetchedHistorical : fetchedCurrent;
-            if (Number.isFinite(fallbackPurchase)) {
-              assetPayload.purchase_price = fallbackPurchase;
+          priceDetails = await fetchDetailsForSymbol(resolvedSymbol, resolvedName);
+          const candidates = priceDetails?.metadata?.candidates || [];
+          const normalisedExpected = (resolvedName || '').toLowerCase();
+          const responseName = (priceDetails?.name || priceDetails?.metadata?.name || '').toLowerCase();
+          const needsConfirmation = candidates.length > 1 && normalisedExpected && responseName && !responseName.includes(normalisedExpected);
+
+          if (needsConfirmation || candidates.length > 1) {
+            const choice = await promptSymbolChoice(resolvedSymbol, resolvedName, candidates);
+            if (choice) {
+              resolvedSymbol = choice.symbol;
+              resolvedName = choice.name || resolvedName;
+              priceDetails = await fetchDetailsForSymbol(resolvedSymbol, resolvedName);
             }
           }
         } catch (priceError) {
           console.warn('[CSVPortfolioImport] price lookup failed', priceError);
         }
 
+        const assetPayload = {
+          ...extractedAsset,
+          symbol: resolvedSymbol,
+          name: priceDetails?.name || resolvedName,
+          broker: brokerName.trim(),
+          purchase_price: extractedAsset.purchase_price || extractedAsset.current_price,
+        };
+
+        const fetchedCurrent = Number(priceDetails?.current_price);
+        if (Number.isFinite(fetchedCurrent)) {
+          assetPayload.current_price = fetchedCurrent;
+        }
+        const fetchedHistorical = Number(priceDetails?.historical_price);
+        if (!Number.isFinite(assetPayload.purchase_price) || assetPayload.purchase_price === 0) {
+          const fallbackPurchase = Number.isFinite(fetchedHistorical) ? fetchedHistorical : fetchedCurrent;
+          if (Number.isFinite(fallbackPurchase)) {
+            assetPayload.purchase_price = fallbackPurchase;
+          }
+        }
+
+        const existingAsset = existingAssets.find(a => a.symbol === assetPayload.symbol && a.broker === brokerName.trim());
+
         if (existingAsset) {
           await Asset.update(existingAsset.id, assetPayload);
           updatedCount++;
         } else {
-          await Asset.create(assetPayload);
+          const created = await Asset.create(assetPayload);
+          existingAssets.push(created);
           createdCount++;
         }
       }
