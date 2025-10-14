@@ -22,6 +22,14 @@ const PORT = process.env.PORT || 4000;
 const MODEL = process.env.OPENAI_MODEL || 'gpt-4o-mini';
 const DEFAULT_SYSTEM_PROMPT = process.env.OPENAI_SYSTEM_PROMPT || 'You are Prism AI, an investment copilot. Provide concise, well-structured answers, and never fabricate data you cannot verify.';
 const OPENAI_MAX_OUTPUT_TOKENS = Number.isNaN(Number.parseInt(process.env.OPENAI_MAX_OUTPUT_TOKENS, 10)) ? 1500 : Number.parseInt(process.env.OPENAI_MAX_OUTPUT_TOKENS, 10);
+const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY || '';
+const OPENROUTER_MODEL = process.env.OPENROUTER_MODEL || 'meta-llama/llama-4-scout:free';
+const OPENROUTER_SITE_URL = process.env.OPENROUTER_SITE_URL || '';
+const OPENROUTER_SITE_NAME = process.env.OPENROUTER_SITE_NAME || '';
+const OPENROUTER_TIMEOUT_RAW = Number.parseInt(process.env.OPENROUTER_TIMEOUT_MS, 10);
+const OPENROUTER_TIMEOUT_MS = Number.isNaN(OPENROUTER_TIMEOUT_RAW) ? 15000 : OPENROUTER_TIMEOUT_RAW;
+const OPENROUTER_BASE_URL = process.env.OPENROUTER_BASE_URL || 'https://openrouter.ai/api/v1/chat/completions';
+const OPENROUTER_ENABLED = Boolean(OPENROUTER_API_KEY);
 
 const YAHOO_RATE_LIMIT_COOLDOWN_MS = Number(process.env.YAHOO_RETRY_DELAY_MS || 60000);
 let yahooRateLimitedUntil = 0;
@@ -115,9 +123,12 @@ app.use('/api/', apiLimiter);
 let openaiClient = null;
 if (process.env.OPENAI_API_KEY) {
   openaiClient = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+} else if (OPENROUTER_ENABLED) {
+  console.warn('[server] OPENAI_API_KEY is not set. Falling back to OpenRouter for supported AI requests.');
 } else {
   console.warn('[server] OPENAI_API_KEY is not set. AI endpoints will return 500 until you provide one.');
 }
+
 
 const uploadStore = new Map();
 
@@ -232,27 +243,91 @@ const sanitizeOpenAIError = (error, fallback = 'AI request failed.') => {
   const responseMessage = error?.response?.data?.error?.message
     || error?.response?.data?.error
     || error?.response?.data
-    || error?.message;
+    || error?.message
+    || error?.body;
 
   if (typeof responseMessage === 'string' && responseMessage.trim().length > 0) {
     message = responseMessage;
   }
 
   if (typeof message === 'string') {
-    message = message.replace(/(sk|OPENAI)[-_A-Za-z0-9]+/g, '[redacted key]');
+    message = message.replace(/(sk|OPENAI|OPENROUTER)[-_A-Za-z0-9]+/g, '[redacted key]');
   } else {
     message = fallback;
   }
 
+  const providerLabel = error?.provider === 'openrouter' ? 'OpenRouter' : 'LLM provider';
+
   if (status === 401) {
-    return { status: 500, message: 'OpenAI rejected the configured API key. Verify OPENAI_API_KEY on the server.' };
+    return { status: 500, message: `${providerLabel} rejected the configured API key. Verify OPENAI_API_KEY or OPENROUTER_API_KEY on the server.` };
   }
   if (status === 429) {
-    return { status: 429, message: 'OpenAI rate limit hit. Please wait and retry.' };
+    return { status: 429, message: `${providerLabel} rate limit hit. Please wait and retry.` };
   }
 
   return { status: status || 502, message };
 };
+
+const requestOpenRouterChatCompletion = async (body) => {
+  if (!OPENROUTER_ENABLED) {
+    const error = new Error('OpenRouter is not configured.');
+    error.provider = 'openrouter';
+    error.status = 500;
+    throw error;
+  }
+
+  const timeoutActive = Number.isFinite(OPENROUTER_TIMEOUT_MS) && OPENROUTER_TIMEOUT_MS > 0;
+  const controller = new AbortController();
+  const timer = timeoutActive ? setTimeout(() => controller.abort(), OPENROUTER_TIMEOUT_MS) : null;
+
+  try {
+    const headers = {
+      Authorization: `Bearer ${OPENROUTER_API_KEY}`,
+      'Content-Type': 'application/json',
+    };
+    if (OPENROUTER_SITE_URL) {
+      headers['HTTP-Referer'] = OPENROUTER_SITE_URL;
+    }
+    if (OPENROUTER_SITE_NAME) {
+      headers['X-Title'] = OPENROUTER_SITE_NAME;
+    }
+
+    const response = await fetch(OPENROUTER_BASE_URL, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ ...body, model: OPENROUTER_MODEL }),
+      signal: controller.signal,
+    });
+
+    if (!response.ok) {
+      const payload = await response.text();
+      const error = new Error(`OpenRouter request failed with status ${response.status}`);
+      error.status = response.status;
+      error.body = payload;
+      error.provider = 'openrouter';
+      throw error;
+    }
+
+    return await response.json();
+  } catch (error) {
+    if (error.name === 'AbortError') {
+      const timeoutError = new Error('OpenRouter request timed out.');
+      timeoutError.provider = 'openrouter';
+      timeoutError.status = 504;
+      timeoutError.cause = error;
+      throw timeoutError;
+    }
+    if (!error.provider) {
+      error.provider = 'openrouter';
+    }
+    throw error;
+  } finally {
+    if (timer) {
+      clearTimeout(timer);
+    }
+  }
+};
+
 
 const LLM_CACHE_TTL_MS = Number(process.env.LLM_CACHE_TTL_MS || 1000 * 60 * 5);
 const LLM_CACHE_MAX_ENTRIES = Number(process.env.LLM_CACHE_MAX_ENTRIES || 50);
@@ -1494,8 +1569,8 @@ app.patch('/api/account/profile', requireAuth, async (req, res) => {
 
 
 app.post('/api/invoke-llm', requireAuth, async (req, res) => {
-  if (!openaiClient) {
-    return res.status(500).json({ error: 'OPENAI_API_KEY is not configured on the server.' });
+  if (!OPENROUTER_ENABLED && !openaiClient) {
+    return res.status(500).json({ error: 'No LLM provider is configured on the server.' });
   }
 
   const { prompt, response_json_schema: schema, system_instruction, add_context_from_internet } = req.body || {};
@@ -1521,6 +1596,11 @@ app.post('/api/invoke-llm', requireAuth, async (req, res) => {
         cached,
         ageMs: Math.max(0, nowMs() - entry.timestamp),
       };
+      if (entry.provider) {
+        payload.meta.provider = entry.provider;
+      }
+    } else if (entry.provider) {
+      payload.meta = { provider: entry.provider };
     }
     return res.json(payload);
   };
@@ -1552,25 +1632,52 @@ app.post('/api/invoke-llm', requireAuth, async (req, res) => {
     }
   }
 
+  const chatOptions = {
+    messages: buildMessages(prompt, system_instruction, add_context_from_internet),
+    temperature: 0.2,
+    top_p: 0.8,
+    presence_penalty: 0,
+    frequency_penalty: 0,
+    max_tokens: OPENAI_MAX_OUTPUT_TOKENS,
+  };
+
+  if (schema) {
+    chatOptions.response_format = {
+      type: 'json_schema',
+      json_schema: {
+        name: 'response',
+        schema,
+      },
+    };
+  }
+
   const request = (async () => {
-    const response = await openaiClient.chat.completions.create({
-      model: MODEL,
-      messages: buildMessages(prompt, system_instruction, add_context_from_internet),
-      temperature: 0.2,
-      top_p: 0.8,
-      presence_penalty: 0,
-      frequency_penalty: 0,
-      max_tokens: OPENAI_MAX_OUTPUT_TOKENS,
-      response_format: schema
-        ? {
-            type: 'json_schema',
-            json_schema: {
-              name: 'response',
-              schema,
-            },
-          }
-        : undefined,
-    });
+    let response = null;
+    let responseProvider = null;
+
+    if (OPENROUTER_ENABLED) {
+      try {
+        response = await requestOpenRouterChatCompletion(chatOptions);
+        responseProvider = 'openrouter';
+      } catch (error) {
+        const sanitised = sanitizeOpenAIError(error, 'OpenRouter request failed.');
+        console.warn('[server] OpenRouter primary model failed', sanitised.message, { status: sanitised.status });
+      }
+    }
+
+    if (!response) {
+      if (!openaiClient) {
+        const fallbackError = new Error('No LLM provider is available to fulfill the request.');
+        fallbackError.status = 502;
+        throw fallbackError;
+      }
+
+      response = await openaiClient.chat.completions.create({
+        ...chatOptions,
+        model: MODEL,
+      });
+      responseProvider = 'openai';
+    }
 
     let value;
     if (schema) {
@@ -1583,7 +1690,8 @@ app.post('/api/invoke-llm', requireAuth, async (req, res) => {
         if (repaired) {
           value = repaired;
         } else {
-          console.error('[server] Failed to parse JSON response from OpenAI', content);
+          const providerLabel = responseProvider === 'openrouter' ? 'OpenRouter' : 'OpenAI';
+          console.error(`[server] Failed to parse JSON response from ${providerLabel}`, content);
           const error = new Error('Model returned invalid JSON');
           error.raw = content;
           throw error;
@@ -1594,7 +1702,7 @@ app.post('/api/invoke-llm', requireAuth, async (req, res) => {
       value = content.trim();
     }
 
-    const entry = { value, timestamp: nowMs() };
+    const entry = { value, timestamp: nowMs(), provider: responseProvider };
     if (cacheEnabled) {
       llmCache.set(cacheKey, entry);
       pruneCache(llmCache, LLM_CACHE_MAX_ENTRIES);
@@ -1619,6 +1727,7 @@ app.post('/api/invoke-llm', requireAuth, async (req, res) => {
     llmInFlight.delete(cacheKey);
   }
 });
+
 
 
 
