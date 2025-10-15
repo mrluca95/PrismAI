@@ -31,6 +31,8 @@ const OPENROUTER_TIMEOUT_MS = Number.isNaN(OPENROUTER_TIMEOUT_RAW) ? 15000 : OPE
 const OPENROUTER_BASE_URL = process.env.OPENROUTER_BASE_URL || 'https://openrouter.ai/api/v1/chat/completions';
 const OPENROUTER_ENABLED = Boolean(OPENROUTER_API_KEY);
 
+let openRouterJsonSchemasSupported = true;
+
 const sanitizeSchemaNullable = (node) => {
   if (Array.isArray(node)) {
     return node.map((entry) => sanitizeSchemaNullable(entry));
@@ -403,6 +405,15 @@ const requestOpenRouterChatCompletion = async (body) => {
     throw error;
   }
 
+  const hasJsonSchema = body?.response_format?.type === 'json_schema';
+  if (hasJsonSchema && !openRouterJsonSchemasSupported) {
+    const error = new Error('OpenRouter json_schema support disabled after previous failures.');
+    error.provider = 'openrouter';
+    error.status = 400;
+    error.unsupportedSchema = true;
+    throw error;
+  }
+
   const timeoutActive = Number.isFinite(OPENROUTER_TIMEOUT_MS) && OPENROUTER_TIMEOUT_MS > 0;
   const controller = new AbortController();
   const timer = timeoutActive ? setTimeout(() => controller.abort(), OPENROUTER_TIMEOUT_MS) : null;
@@ -451,6 +462,16 @@ const requestOpenRouterChatCompletion = async (body) => {
       if (typeof providerMessage === 'string' && providerMessage.trim().length > 0) {
         derivedMessage = providerMessage.trim();
       }
+      if (hasJsonSchema && response.status === 400 && /invalid json_schema/i.test(derivedMessage)) {
+        openRouterJsonSchemasSupported = false;
+        const disableError = new Error('OpenRouter rejected json_schema requests: ' + derivedMessage);
+        disableError.provider = 'openrouter';
+        disableError.status = 400;
+        disableError.unsupportedSchema = true;
+        disableError.body = parsed?.metadata?.raw || payloadText;
+        disableError.details = parsed;
+        throw disableError;
+      }
       const error = new Error(derivedMessage);
       error.status = response.status;
       error.body = parsed?.metadata?.raw || payloadText;
@@ -480,7 +501,6 @@ const requestOpenRouterChatCompletion = async (body) => {
     }
   }
 };
-
 
 const LLM_CACHE_TTL_MS = Number(process.env.LLM_CACHE_TTL_MS || 1000 * 60 * 5);
 const LLM_CACHE_MAX_ENTRIES = Number(process.env.LLM_CACHE_MAX_ENTRIES || 50);
@@ -1825,8 +1845,12 @@ app.post('/api/invoke-llm', requireAuth, async (req, res) => {
         response = await requestOpenRouterChatCompletion(chatOptions);
         responseProvider = 'openrouter';
       } catch (error) {
-        const sanitised = sanitizeOpenAIError(error, 'OpenRouter request failed.');
-        console.warn('[server] OpenRouter primary model failed', sanitised.message, { status: sanitised.status });
+        if (error?.unsupportedSchema) {
+          console.warn('[server] OpenRouter json_schema unsupported; falling back to OpenAI.');
+        } else {
+          const sanitised = sanitizeOpenAIError(error, 'OpenRouter request failed.');
+          console.warn('[server] OpenRouter primary model failed', sanitised.message, { status: sanitised.status });
+        }
       }
     }
 
@@ -2051,7 +2075,35 @@ app.post('/api/extract', requireAuth, async (req, res) => {
       ],
     };
 
-    const response = await requestOpenRouterChatCompletion(chatOptions);
+    let response = null;
+    let responseProvider = null;
+
+    if (OPENROUTER_ENABLED) {
+      try {
+        response = await requestOpenRouterChatCompletion(chatOptions);
+        responseProvider = 'openrouter';
+      } catch (error) {
+        if (error?.unsupportedSchema) {
+          console.warn('[server] OpenRouter json_schema unsupported in /api/extract; falling back to OpenAI.');
+        } else {
+          const sanitised = sanitizeOpenAIError(error, 'OpenRouter request failed.');
+          console.warn('[server] extract openrouter failed', sanitised.message, { status: sanitised.status });
+        }
+      }
+    }
+
+    if (!response) {
+      if (!openaiClient) {
+        const fallbackError = new Error('OpenRouter request failed and no OpenAI fallback is configured.');
+        fallbackError.provider = 'openrouter';
+        throw fallbackError;
+      }
+      response = await openaiClient.chat.completions.create({
+        ...chatOptions,
+        model: MODEL,
+      });
+      responseProvider = 'openai';
+    }
 
     const structured = extractJsonFromResponse(response);
     if (!structured) {
@@ -2060,10 +2112,11 @@ app.post('/api/extract', requireAuth, async (req, res) => {
       if (repaired) {
         return sendSuccess(repaired);
       }
+      const providerLabel = responseProvider === 'openrouter' ? 'OpenRouter' : 'OpenAI';
       const error = new Error('Model returned invalid JSON');
       error.raw = content;
-      error.provider = 'openrouter';
-      console.error('[server] Failed to parse JSON response from OpenRouter', content);
+      error.provider = responseProvider || 'openrouter';
+      console.error(`[server] Failed to parse JSON response from ${providerLabel}`, content);
       throw error;
     }
     return sendSuccess(structured);
