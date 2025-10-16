@@ -17,7 +17,7 @@ const tiers = {
     quotes: parseIntEnv('PRISM_TIER_PLUS_QUOTES', 2000),
   },
   PRO: {
-    insights: parseIntEnv('PRISM_TIER_PRO_INSIGHTS', 1000),
+    insights: parseIntEnv('PRISM_TIER_PRO_INSIGHTS', 5000),
     quotes: parseIntEnv('PRISM_TIER_PRO_QUOTES', 10000),
   },
 };
