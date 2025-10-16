@@ -118,8 +118,17 @@ export default function CSVPortfolioImport({ onSuccess }) {
       let updatedCount = 0;
 
       for (const extractedAsset of extractedData.assets) {
-        const today = new Date();
-        const dateString = today.toISOString().slice(0, 10);
+        const fallbackPurchaseDate = new Date(Date.UTC(1970, 0, 2));
+        let effectiveDate = fallbackPurchaseDate;
+
+        if (extractedAsset.purchase_date) {
+          const parsedDate = new Date(extractedAsset.purchase_date);
+          if (!Number.isNaN(parsedDate.getTime()) && parsedDate.getTime() >= fallbackPurchaseDate.getTime()) {
+            effectiveDate = parsedDate;
+          }
+        }
+
+        const dateString = effectiveDate.toISOString().slice(0, 10);
         let resolvedSymbol = extractedAsset.symbol;
         let resolvedName = extractedAsset.name || extractedAsset.symbol;
         let priceDetails = null;

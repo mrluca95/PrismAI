@@ -1,16 +1,16 @@
 
-import React, { useState, useMemo, useEffect } from 'react';
+import React, { useState, useMemo, useEffect, useCallback } from 'react';
 import { AreaChart, Area, XAxis, YAxis, Tooltip, ResponsiveContainer } from 'recharts';
 import { useCurrency } from "@/context/CurrencyContext.jsx";
 
-const timelineOptions = ["1D", "1W", "1M", "3M", "YTD", "1Y", "All"];
+const timelineOptions = ["1D", "1W", "1M", "3M", "YTD", "1Y", "5Y", "All"];
 
 export default function PerformanceChart({ assets, totalValue, isLoading, setPerformanceSign = () => {}, totalDayChange }) {
-  const { format, convert } = useCurrency();
+  const { format, convert, currency } = useCurrency();
   const [activeTimeline, setActiveTimeline] = useState("1D");
   const [hoverData, setHoverData] = useState(null);
 
-  const chartData = useMemo(() => {
+  const rawChartData = useMemo(() => {
     if (isLoading || assets.length === 0) return [];
     
     const generateData = (days, interval) => {
@@ -60,7 +60,7 @@ export default function PerformanceChart({ assets, totalValue, isLoading, setPer
         }
         
         return data;
-    }
+    };
 
     switch(activeTimeline) {
         case "1D": return generateData(1, 1/24); // 1 day, with hourly-ish intervals
@@ -73,10 +73,37 @@ export default function PerformanceChart({ assets, totalValue, isLoading, setPer
             const daysSinceYTD = Math.floor((today - startOfYear) / (1000 * 60 * 60 * 24));
             return generateData(daysSinceYTD, Math.max(1, Math.ceil(daysSinceYTD/30)));
         case "1Y": return generateData(365, 7);
+        case "5Y": return generateData(365 * 5, 30);
         case "All": return generateData(365 * 2, 30);
         default: return [];
     }
   }, [activeTimeline, assets, totalValue, isLoading, totalDayChange]);
+
+  const chartData = useMemo(() => {
+    return rawChartData.map((point) => {
+      const convertedValue = convert(point.value);
+      const safeValue = Number.isFinite(convertedValue) ? convertedValue : 0;
+      return {
+        date: point.date,
+        value: Number(safeValue.toFixed(2)),
+      };
+    });
+  }, [rawChartData, convert]);
+
+  const convertedTotalValue = useMemo(() => {
+    const numeric = Number(totalValue);
+    if (!Number.isFinite(numeric)) {
+      return 0;
+    }
+    const result = convert(numeric);
+    return Number.isFinite(result) ? result : 0;
+  }, [totalValue, convert]);
+
+  const formatDisplay = useCallback(
+    (value, options = {}) =>
+      format(value, { fromCurrency: currency, toCurrency: currency, ...options }),
+    [format, currency],
+  );
 
   useEffect(() => {
     if (chartData.length > 1) {
@@ -88,13 +115,28 @@ export default function PerformanceChart({ assets, totalValue, isLoading, setPer
     }
   }, [chartData, setPerformanceSign]);
 
-  const chartMin = chartData.length > 0 ? Math.min(...chartData.map(d => d.value)) * 0.98 : 0;
-  const chartMax = chartData.length > 0 ? Math.max(...chartData.map(d => d.value)) * 1.02 : totalValue * 1.02;
+  useEffect(() => {
+    setHoverData(null);
+  }, [activeTimeline, currency]);
 
-  const initialValue = chartData.length > 0 ? chartData[0].value : totalValue;
-  const latestValue = chartData.length > 0 ? chartData[chartData.length - 1].value : totalValue;
-  
-  const displayData = hoverData || { value: latestValue, date: new Date() };
+  const chartMinRaw = chartData.length > 0
+    ? Math.min(...chartData.map((d) => d.value)) * 0.98
+    : convertedTotalValue * 0.98;
+
+  const chartMaxRaw = chartData.length > 0
+    ? Math.max(...chartData.map((d) => d.value)) * 1.02
+    : convertedTotalValue * 1.02;
+
+  const domainMin = Number.isFinite(chartMinRaw) ? Math.max(chartMinRaw, 0) : 0;
+  const domainMax = Number.isFinite(chartMaxRaw)
+    ? Math.max(chartMaxRaw, domainMin > 0 ? domainMin * 1.05 : 1)
+    : (domainMin > 0 ? domainMin * 1.05 : 1);
+
+  const initialValue = chartData.length > 0 ? chartData[0].value : convertedTotalValue;
+  const latestValue = chartData.length > 0 ? chartData[chartData.length - 1].value : convertedTotalValue;
+
+  const latestPoint = chartData.length > 0 ? chartData[chartData.length - 1] : null;
+  const displayData = hoverData || latestPoint || { value: convertedTotalValue, date: new Date() };
 
   const performanceChange = displayData.value - initialValue;
   const performanceChangePercent = initialValue > 0 ? (performanceChange / initialValue) * 100 : 0;
@@ -115,6 +157,7 @@ export default function PerformanceChart({ assets, totalValue, isLoading, setPer
         case "3M": return date.toLocaleDateString('en-US', { day: 'numeric', month: 'short' });
         case "YTD":
         case "1Y":
+        case "5Y":
         case "All": return date.toLocaleDateString('en-US', { month: 'short', year: '2-digit' });
         default: return date.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
     }
@@ -142,10 +185,10 @@ export default function PerformanceChart({ assets, totalValue, isLoading, setPer
     <div className="neomorph rounded-2xl p-4 md:p-6 space-y-4">
       <div>
         <h2 className="text-3xl font-bold text-purple-900">
-          {format(displayData.value)}
+          {formatDisplay(displayData.value, { maximumFractionDigits: 2 })}
         </h2>
         <div className={`flex items-center text-sm font-medium ${isPositive ? 'text-green-600' : 'text-red-600'}`}>
-          <span>{isPositive ? '+' : '-'}{format(Math.abs(performanceChange))}</span>
+          <span>{isPositive ? '+' : '-'}{formatDisplay(Math.abs(performanceChange), { maximumFractionDigits: 2 })}</span>
           <span className="mx-2">|</span>
           <span>{isPositive ? '+' : '-'}{Math.abs(performanceChangePercent).toFixed(2)}%</span>
           <span className="ml-2 text-purple-600">
@@ -172,8 +215,15 @@ export default function PerformanceChart({ assets, totalValue, isLoading, setPer
               contentStyle={{ display: 'none' }}
             />
             <YAxis
-              domain={[chartMin, chartMax]}
-              tickFormatter={(value) => format(value, { minimumFractionDigits: 0, maximumFractionDigits: 0 })}
+              domain={[domainMin, domainMax]}
+              tickFormatter={(value) => {
+                const absValue = Math.abs(value);
+                const fractionDigits = absValue < 1000 ? 2 : 0;
+                return formatDisplay(value, {
+                  minimumFractionDigits: fractionDigits,
+                  maximumFractionDigits: fractionDigits,
+                });
+              }}
               stroke="var(--text-color-secondary)"
               fontSize={12}
             />

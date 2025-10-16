@@ -343,6 +343,7 @@ const fallbackFetchPriceTimeline = async ({ symbol, timeline }) => {
     '3M': { points: 90, stepMs: DAY_MS },
     'YTD': { points: daysSinceYTD, stepMs: DAY_MS },
     '1Y': { points: 52, stepMs: 7 * DAY_MS },
+    '5Y': { points: 260, stepMs: 7 * DAY_MS },
     ALL: { points: 120, stepMs: 30 * DAY_MS },
   };
 

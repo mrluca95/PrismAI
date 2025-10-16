@@ -238,6 +238,46 @@ const parseJsonSafe = (raw) => {
     return tryParseLooseJson(raw);
   }
 };
+const maskProviderErrorMessage = (message) => {
+  if (typeof message !== 'string') {
+    return '';
+  }
+  return message
+    .replace(/(api key as\s+)([A-Z0-9]+)/gi, (_, prefix) => prefix + '[redacted]')
+    .replace(/(sk-[A-Za-z0-9_-]+)/g, '[redacted key]');
+};
+
+const classifyPriceProviderError = (error) => {
+  const rawMessage = typeof error?.message === 'string' ? error.message : '';
+  const sanitizedMessage = maskProviderErrorMessage(rawMessage);
+  const lowerMessage = sanitizedMessage.toLowerCase();
+  if (lowerMessage.includes('alphavantage.co') || lowerMessage.includes('25 requests per day') || lowerMessage.includes('premium plan')) {
+    return {
+      provider: 'alpha_vantage',
+      status: 429,
+      isRateLimit: true,
+      sanitizedMessage,
+      clientMessage: 'External price provider rate limit reached. Try again later or configure a premium API key.',
+    };
+  }
+  if (error?.status === 429 || lowerMessage.includes('rate limit')) {
+    return {
+      provider: error?.provider || 'external',
+      status: error?.status || 429,
+      isRateLimit: true,
+      sanitizedMessage: sanitizedMessage || 'External price provider rate limit reached.',
+      clientMessage: sanitizedMessage || 'External price provider rate limit reached.',
+    };
+  }
+  return {
+    provider: error?.provider || 'external',
+    status: error?.status || 502,
+    isRateLimit: Boolean(error?.isRateLimit),
+    sanitizedMessage: sanitizedMessage || rawMessage || 'Price provider error.',
+    clientMessage: sanitizedMessage || rawMessage || 'Failed to retrieve price data.',
+  };
+};
+
 const fetchHistoricalPriceFromOpenAI = async (symbol, targetDate) => {
   if (!openaiClient || !symbol || !targetDate) {
     return null;
@@ -530,6 +570,7 @@ const PRICE_TIMELINE_SETTINGS = {
   '3M': { range: '3mo', interval: '1d', ttl: PRICE_HISTORY_TTL_MS },
   'YTD': { range: 'ytd', interval: '1d', ttl: PRICE_HISTORY_TTL_MS },
   '1Y': { range: '1y', interval: '1wk', ttl: PRICE_HISTORY_TTL_MS },
+  '5Y': { range: '5y', interval: '1wk', ttl: PRICE_HISTORY_TTL_MS },
   ALL: { range: 'max', interval: '1mo', ttl: PRICE_HISTORY_TTL_MS },
 };
 
@@ -1425,6 +1466,34 @@ const resolvePriceQuote = async (symbol, options = {}) => {
 
   try {
     return await request;
+  } catch (error) {
+    const info = classifyPriceProviderError(error);
+    if (info.provider === 'alpha_vantage' && info.isRateLimit) {
+      let fallbackEntry = await buildStooqQuoteEntry(cacheKey);
+      if (!isValidQuoteEntry(fallbackEntry)) {
+        fallbackEntry = await fetchPriceFromOpenAI(cacheKey);
+      }
+      if (isValidQuoteEntry(fallbackEntry)) {
+        if (PRICE_CACHE_TTL_MS > 0) {
+          priceCache.set(cacheKey, fallbackEntry);
+          pruneCache(priceCache, PRICE_CACHE_MAX_ENTRIES);
+        }
+        return fallbackEntry;
+      }
+      const rateLimitError = new Error(info.clientMessage);
+      rateLimitError.provider = info.provider;
+      rateLimitError.status = info.status;
+      rateLimitError.isRateLimit = true;
+      rateLimitError.sanitizedMessage = info.sanitizedMessage;
+      throw rateLimitError;
+    }
+    if (info.isRateLimit && !error.isRateLimit) {
+      error.isRateLimit = true;
+      if (!error.status) {
+        error.status = info.status;
+      }
+    }
+    throw error;
   } finally {
     priceInFlight.delete(cacheKey);
   }
@@ -2531,8 +2600,14 @@ app.post('/api/prices', requireAuth, async (req, res) => {
         results[symbol] = fallback;
       }
     } catch (error) {
-      console.error(`[server] price fetch error for ${symbol}`, error);
-      fetchErrors.push({ symbol, message: error.message });
+      const info = classifyPriceProviderError(error);
+      const logMessage = info.sanitizedMessage || error?.message || 'Unknown provider error';
+      const logDetails = { provider: info.provider, status: info.status };
+      if (error?.code) {
+        logDetails.code = error.code;
+      }
+      console.error(`[server] price fetch error for ${symbol}`, logMessage, logDetails);
+      fetchErrors.push({ symbol, message: info.clientMessage, status: info.status });
       if (!results[symbol] && staleFallbacks.has(symbol)) {
         const fallback = cloneValue(staleFallbacks.get(symbol).value);
         fallback.stale = true;
@@ -2543,7 +2618,8 @@ app.post('/api/prices', requireAuth, async (req, res) => {
 
   if (Object.keys(results).length === 0) {
     if (fetchErrors.length > 0) {
-      return res.status(502).json({ error: fetchErrors[0].message || 'Failed to retrieve prices.' });
+      const primaryError = fetchErrors[0];
+      return res.status(primaryError.status || 502).json({ error: primaryError.message || 'Failed to retrieve prices.' });
     }
     return res.status(404).json({ error: 'No quote data returned for provided symbols.' });
   }

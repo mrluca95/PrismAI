@@ -1,9 +1,9 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useState, useCallback } from "react";
 import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from "recharts";
 import { useCurrency } from "@/context/CurrencyContext.jsx";
 import { FetchPriceTimeline } from "@/integrations/Core.js";
 
-const TIMELINE_OPTIONS = ["1D", "1W", "1M", "3M", "YTD", "1Y", "All"];
+const TIMELINE_OPTIONS = ["1D", "1W", "1M", "3M", "YTD", "1Y", "5Y", "All"];
 const DEFAULT_TIMELINE = "1M";
 
 const formatLabelForTimeline = (date, timelineKey) => {
@@ -17,6 +17,7 @@ const formatLabelForTimeline = (date, timelineKey) => {
       return date.toLocaleDateString("en-US", { month: "short", day: "numeric" });
     case "YTD":
     case "1Y":
+    case "5Y":
     case "ALL":
       return date.toLocaleDateString("en-US", { month: "short", year: "2-digit" });
     default:
@@ -42,7 +43,12 @@ const formatTooltipDate = (date, timelineKey) => {
 };
 
 export default function AssetChart({ asset }) {
-  const { format, convert } = useCurrency();
+  const { format, convert, currency } = useCurrency();
+  const formatDisplay = useCallback(
+    (value, options = {}) =>
+      format(value, { fromCurrency: currency, toCurrency: currency, ...options }),
+    [format, currency],
+  );
   const [activeTimeline, setActiveTimeline] = useState(DEFAULT_TIMELINE);
   const [timelineDataMap, setTimelineDataMap] = useState({});
   const [isLoading, setIsLoading] = useState(false);
@@ -159,7 +165,7 @@ export default function AssetChart({ asset }) {
           {formatTooltipDate(date, timelineKey)}
         </p>
         <p className="text-gray-600 dark:text-gray-300">
-          {format(dataPoint.priceConverted)}
+          {formatDisplay(dataPoint.priceConverted, { maximumFractionDigits: 2 })}
         </p>
       </div>
     );
@@ -235,7 +241,14 @@ export default function AssetChart({ asset }) {
                 />
                 <YAxis
                   domain={[chartMin, chartMax]}
-                  tickFormatter={(value) => format(value, { minimumFractionDigits: 0, maximumFractionDigits: 0 })}
+                  tickFormatter={(value) => {
+                    const absValue = Math.abs(value);
+                    const fractionDigits = absValue < 1000 ? 2 : 0;
+                    return formatDisplay(value, {
+                      minimumFractionDigits: fractionDigits,
+                      maximumFractionDigits: fractionDigits,
+                    });
+                  }}
                   stroke="#6b7280"
                   fontSize={12}
                 />
