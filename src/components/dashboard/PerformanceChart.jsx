@@ -4,9 +4,10 @@ import { AreaChart, Area, XAxis, YAxis, Tooltip, ResponsiveContainer } from 'rec
 import { useCurrency } from "@/context/CurrencyContext.jsx";
 
 const timelineOptions = ["1D", "1W", "1M", "3M", "YTD", "1Y", "5Y", "All"];
+const MAGNITUDE_SUFFIXES = ['', 'K', 'M', 'B', 'T', 'Q'];
 
 export default function PerformanceChart({ assets, totalValue, isLoading, setPerformanceSign = () => {}, totalDayChange }) {
-  const { format, convert, currency } = useCurrency();
+  const { format, convert, currency, symbol } = useCurrency();
   const [activeTimeline, setActiveTimeline] = useState("1D");
   const [hoverData, setHoverData] = useState(null);
 
@@ -105,33 +106,37 @@ export default function PerformanceChart({ assets, totalValue, isLoading, setPer
     [format, currency],
   );
 
-  const axisFormatter = useMemo(
-    () =>
-      new Intl.NumberFormat("en-US", {
-        style: "currency",
-        currency,
-        notation: "compact",
-        maximumFractionDigits: 1,
-        minimumFractionDigits: 0,
-      }),
-    [currency],
-  );
-
   const formatAxisTick = useCallback(
     (raw) => {
       const value = Number(raw);
       if (!Number.isFinite(value)) {
         return "";
       }
-      if (Math.abs(value) < 1) {
+      if (value === 0) {
+        return `${symbol}0`;
+      }
+      const absValue = Math.abs(value);
+      if (absValue < 1) {
         return formatDisplay(value, {
           minimumFractionDigits: 0,
           maximumFractionDigits: 2,
         });
       }
-      return axisFormatter.format(value);
+      if (absValue < 1000) {
+        const rounded = Math.floor(absValue);
+        return `${value < 0 ? '-' : ''}${symbol}${rounded}`;
+      }
+
+      const magnitude = Math.floor(Math.log10(absValue));
+      const suffixIndex = Math.min(Math.floor(magnitude / 3), MAGNITUDE_SUFFIXES.length - 1);
+      const scaled = absValue / (10 ** (suffixIndex * 3));
+      const firstDigit = Math.floor(scaled).toString().charAt(0) || '0';
+      const suffix = MAGNITUDE_SUFFIXES[suffixIndex];
+      const prefix = value < 0 ? '-' : '';
+
+      return `${prefix}${symbol}${firstDigit}${suffix}`;
     },
-    [axisFormatter, formatDisplay],
+    [formatDisplay, symbol],
   );
 
   useEffect(() => {
@@ -230,7 +235,7 @@ export default function PerformanceChart({ assets, totalValue, isLoading, setPer
         <ResponsiveContainer width="100%" height="100%">
           <AreaChart 
             data={chartData} 
-            margin={{ top: 5, right: 10, left: -20, bottom: 0 }}
+            margin={{ top: 5, right: 10, left: 16, bottom: 0 }}
             onMouseMove={handleMouseMove}
             onMouseLeave={handleMouseLeave}
           >
@@ -248,6 +253,10 @@ export default function PerformanceChart({ assets, totalValue, isLoading, setPer
               tickFormatter={formatAxisTick}
               stroke="var(--text-color-secondary)"
               fontSize={12}
+              width={64}
+              tickMargin={8}
+              tickLine={false}
+              axisLine={false}
             />
             <XAxis 
               dataKey="date" 
