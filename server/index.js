@@ -1155,22 +1155,10 @@ const extractJsonFromResponse = (response) => {
           return part.data;
         }
       }
-      if (typeof part === 'string') {
-        const parsed = parseJsonSafe(part);
-        if (parsed && typeof parsed === 'object') {
-          return parsed;
-        }
-      }
     }
   }
   if (content && typeof content === 'object' && content.output && typeof content.output === 'object') {
     return content.output;
-  }
-  if (typeof content === 'string') {
-    const parsed = parseJsonSafe(content);
-    if (parsed && typeof parsed === 'object') {
-      return parsed;
-    }
   }
   return null;
 };
