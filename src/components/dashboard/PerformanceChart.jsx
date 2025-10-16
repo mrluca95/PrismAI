@@ -105,6 +105,35 @@ export default function PerformanceChart({ assets, totalValue, isLoading, setPer
     [format, currency],
   );
 
+  const axisFormatter = useMemo(
+    () =>
+      new Intl.NumberFormat("en-US", {
+        style: "currency",
+        currency,
+        notation: "compact",
+        maximumFractionDigits: 1,
+        minimumFractionDigits: 0,
+      }),
+    [currency],
+  );
+
+  const formatAxisTick = useCallback(
+    (raw) => {
+      const value = Number(raw);
+      if (!Number.isFinite(value)) {
+        return "";
+      }
+      if (Math.abs(value) < 1) {
+        return formatDisplay(value, {
+          minimumFractionDigits: 0,
+          maximumFractionDigits: 2,
+        });
+      }
+      return axisFormatter.format(value);
+    },
+    [axisFormatter, formatDisplay],
+  );
+
   useEffect(() => {
     if (chartData.length > 1) {
       const startValue = chartData[0].value;
@@ -216,14 +245,7 @@ export default function PerformanceChart({ assets, totalValue, isLoading, setPer
             />
             <YAxis
               domain={[domainMin, domainMax]}
-              tickFormatter={(value) => {
-                const absValue = Math.abs(value);
-                const fractionDigits = absValue < 1000 ? 2 : 0;
-                return formatDisplay(value, {
-                  minimumFractionDigits: fractionDigits,
-                  maximumFractionDigits: fractionDigits,
-                });
-              }}
+              tickFormatter={formatAxisTick}
               stroke="var(--text-color-secondary)"
               fontSize={12}
             />
