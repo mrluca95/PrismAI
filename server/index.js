@@ -1154,6 +1154,24 @@ const extractJsonFromResponse = (response) => {
         if (part.type === 'json_schema' && typeof part.data === 'object') {
           return part.data;
         }
+        const textCandidates = [];
+        if (typeof part.text === 'string') {
+          textCandidates.push(part.text);
+        } else if (Array.isArray(part.text)) {
+          textCandidates.push(...part.text.filter((value) => typeof value === 'string'));
+        }
+        if (typeof part.value === 'string') {
+          textCandidates.push(part.value);
+        }
+        if (typeof part.message === 'string') {
+          textCandidates.push(part.message);
+        }
+        for (const candidate of textCandidates) {
+          const parsed = parseJsonSafe(candidate);
+          if (parsed && typeof parsed === 'object') {
+            return parsed;
+          }
+        }
       }
       if (typeof part === 'string') {
         const parsed = parseJsonSafe(part);
