@@ -13,6 +13,7 @@ import passport, { configurePassport } from './auth/passport.js';
 import { config, getTierLimits } from './lib/config.js';
 import { requireAuth, optionalAuth } from './middleware/auth.js';
 import { getUsage, assertWithinQuota, consumeUsage } from './lib/usage.js';
+import { getCurrencyRates } from './lib/currency.js';
 import { sanitizeUser, getUserById, getUserByEmail, createUser, updateUser } from './lib/users.js';
 import { AuthProvider } from './lib/auth-providers.js';
 
@@ -1776,6 +1777,25 @@ app.get('/api/health', optionalAuth, (req, res) => {
   res.json({ status: 'ok', model: MODEL });
 });
 
+app.get('/api/currency/rates', optionalAuth, async (req, res) => {
+  try {
+    const refreshParam = String(req.query?.refresh || '').toLowerCase();
+    const forceRefresh = refreshParam === '1' || refreshParam === 'true';
+    const payload = await getCurrencyRates({ forceRefresh });
+    return res.json({
+      base: payload.base,
+      rates: payload.rates,
+      as_of: payload.asOf,
+      provider: payload.provider,
+      fallback: payload.fallback,
+      error: payload.error || null,
+    });
+  } catch (error) {
+    console.error('[server] currency rates error', error?.message || error);
+    return res.status(502).json({ error: 'Unable to retrieve currency rates.' });
+  }
+});
+
 app.post('/api/account/tier', requireAuth, async (req, res) => {
   try {
     const body = tierUpdateSchema.parse(req.body);
@@ -2027,6 +2047,8 @@ app.post('/api/extract', requireAuth, async (req, res) => {
     return res.status(400).json({ error: 'json_schema is required' });
   }
 
+  const sanitizedSchema = sanitizeSchemaNullable(schema);
+
   try {
     const usage = await getUsage(req.user.id);
     assertWithinQuota(req.user, usage);
@@ -2080,7 +2102,8 @@ app.post('/api/extract', requireAuth, async (req, res) => {
           type: 'json_schema',
           json_schema: {
             name: 'portfolio_extraction',
-            schema,
+            schema: sanitizedSchema,
+            strict: true,
           },
         },
         messages: [
@@ -2135,7 +2158,8 @@ app.post('/api/extract', requireAuth, async (req, res) => {
         type: 'json_schema',
         json_schema: {
           name: 'document_extraction',
-          schema,
+          schema: sanitizedSchema,
+          strict: true,
         },
       },
       messages: [
