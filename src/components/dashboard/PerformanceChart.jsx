@@ -17,6 +17,80 @@ export default function PerformanceChart({ assets, totalValue, isLoading, setPer
   const [timelineError, setTimelineError] = useState(null);
   const timelineCacheRef = useRef(new Map());
 
+  const syntheticSeriesUSD = useMemo(() => {
+    if (isLoading || !assets || assets.length === 0) {
+      return [];
+    }
+
+    const generateData = (days, stepDays) => {
+      const points = [];
+      let changeForPeriod = 0;
+
+      if (activeTimeline === "1D") {
+        changeForPeriod = totalDayChange || 0;
+      } else {
+        changeForPeriod = assets.reduce((sum, asset) => sum + (asset.gain_loss || 0), 0);
+      }
+
+      const startValue = Math.max(0, Number(totalValue) - changeForPeriod);
+      const safeStart = Number.isFinite(startValue) ? startValue : 0;
+      const totalNumeric = Number(totalValue) || 0;
+      const trendPerDay = days > 0 ? (totalNumeric - safeStart) / days : 0;
+      const now = new Date();
+      const steps = Math.max(2, Math.ceil(days / stepDays));
+
+      for (let index = 0; index < steps; index += 1) {
+        const progress = steps <= 1 ? 1 : index / (steps - 1);
+        const date = new Date(now.getTime() - (days * (1 - progress)) * 24 * 60 * 60 * 1000);
+
+        let value;
+        if (index === 0) {
+          value = safeStart;
+        } else {
+          const volatilityFactor = 0.015;
+          const noise = (Math.random() - 0.5) * volatilityFactor * safeStart;
+          value = Math.max(0, safeStart + trendPerDay * (days * progress) + noise);
+        }
+
+        points.push({
+          date,
+          value: Number.isFinite(value) ? Number(value.toFixed(2)) : 0,
+        });
+      }
+
+      if (points.length > 0) {
+        points[points.length - 1] = { date: new Date(), value: Number(totalNumeric.toFixed(2)) || 0 };
+      }
+
+      return points;
+    };
+
+    switch (activeTimeline) {
+      case "1D":
+        return generateData(1, 1 / 24);
+      case "1W":
+        return generateData(7, 1);
+      case "1M":
+        return generateData(30, 2);
+      case "3M":
+        return generateData(90, 3);
+      case "YTD": {
+        const startOfYear = new Date(new Date().getFullYear(), 0, 1);
+        const today = new Date();
+        const daysSinceYTD = Math.max(1, Math.floor((today - startOfYear) / (1000 * 60 * 60 * 24)));
+        return generateData(daysSinceYTD, Math.max(1, Math.ceil(daysSinceYTD / 30)));
+      }
+      case "1Y":
+        return generateData(365, 7);
+      case "5Y":
+        return generateData(365 * 5, 30);
+      case "All":
+        return generateData(365 * 2, 30);
+      default:
+        return generateData(30, 2);
+    }
+  }, [activeTimeline, assets, isLoading, totalDayChange, totalValue]);
+
   useEffect(() => {
     let cancelled = false;
 
@@ -84,7 +158,7 @@ export default function PerformanceChart({ assets, totalValue, isLoading, setPer
 
   const aggregatedSeriesUSD = useMemo(() => {
     if (timelineSources.length === 0) {
-      return [];
+      return syntheticSeriesUSD;
     }
 
     const assetSeries = timelineSources
@@ -126,7 +200,7 @@ export default function PerformanceChart({ assets, totalValue, isLoading, setPer
       .filter(Boolean);
 
     if (assetSeries.length === 0) {
-      return [];
+      return syntheticSeriesUSD;
     }
 
     const timestamps = new Set();
@@ -137,7 +211,7 @@ export default function PerformanceChart({ assets, totalValue, isLoading, setPer
     });
 
     if (timestamps.size === 0) {
-      return [];
+      return syntheticSeriesUSD;
     }
 
     const sortedTimes = Array.from(timestamps).sort((a, b) => a - b);
@@ -171,8 +245,8 @@ export default function PerformanceChart({ assets, totalValue, isLoading, setPer
       aggregated.push({ date: new Date(), value: numericTotal });
     }
 
-    return aggregated;
-  }, [timelineSources, convert, totalValue]);
+    return aggregated.length > 0 ? aggregated : syntheticSeriesUSD;
+  }, [timelineSources, convert, totalValue, syntheticSeriesUSD]);
 
   const chartData = useMemo(() => {
     return aggregatedSeriesUSD.map((point) => {
@@ -376,6 +450,12 @@ export default function PerformanceChart({ assets, totalValue, isLoading, setPer
           </div>
         )}
       </div>
+
+      {hasTimelineError && hasChartData && (
+        <p className="text-xs text-purple-500 text-center">
+          Some holdings are missing price history right now. Displaying an estimated trend until quotes sync.
+        </p>
+      )}
       
       {/* Mobile responsive timeline buttons */}
       <div className="flex justify-center">
