@@ -96,7 +96,9 @@ export default function PerformanceChart({ assets, totalValue, isLoading, setPer
 
     const load = async () => {
       if (isLoading) {
-        setTimelineLoading(true);
+        if (!cancelled) {
+          setTimelineLoading(true);
+        }
         return;
       }
 
@@ -109,43 +111,116 @@ export default function PerformanceChart({ assets, totalValue, isLoading, setPer
         return;
       }
 
-      setTimelineLoading(true);
-      setTimelineError(null);
-
       const timelineKey = activeTimeline.toUpperCase();
+      const normalizedAssets = assets
+        .map((asset) => {
+          const symbol = String(asset?.symbol || '').trim().toUpperCase();
+          if (!symbol) {
+            return null;
+          }
+          const cacheKey = `${timelineKey}:${symbol}`;
+          return { asset, symbol, cacheKey };
+        })
+        .filter(Boolean);
 
-      const tasks = assets.map(async (asset) => {
-        const symbol = String(asset?.symbol || "").trim().toUpperCase();
-        if (!symbol) {
-          return { asset, chart: null, error: null };
+      if (normalizedAssets.length === 0) {
+        if (!cancelled) {
+          setTimelineSources([]);
+          setTimelineError(null);
+          setTimelineLoading(false);
         }
-        const cacheKey = `${timelineKey}:${symbol}`;
-        if (timelineCacheRef.current.has(cacheKey)) {
-          return { asset, chart: timelineCacheRef.current.get(cacheKey), error: null };
-        }
-        try {
-          const chart = await FetchPriceTimeline({ symbol, timeline: timelineKey });
-          timelineCacheRef.current.set(cacheKey, chart);
-          return { asset, chart, error: null };
-        } catch (error) {
-          return { asset, chart: null, error };
+        return;
+      }
+
+      const cachedEntries = [];
+      const assetsToFetch = [];
+
+      normalizedAssets.forEach((entry) => {
+        const cached = timelineCacheRef.current.get(entry.cacheKey);
+        if (cached) {
+          cachedEntries.push({ ...entry, chart: cached });
+        } else {
+          assetsToFetch.push(entry);
         }
       });
 
-      const resolved = await Promise.all(tasks);
+      if (!cancelled) {
+        const orderedCached = normalizedAssets
+          .map((entry) => {
+            const match = cachedEntries.find((item) => item.symbol === entry.symbol);
+            return match ? { asset: match.asset, chart: match.chart } : null;
+          })
+          .filter(Boolean);
+        setTimelineSources(orderedCached);
+        setTimelineError(null);
+      }
+
+      if (assetsToFetch.length === 0) {
+        if (!cancelled) {
+          setTimelineLoading(false);
+        }
+        return;
+      }
+
+      if (!cancelled) {
+        setTimelineLoading(true);
+      }
+
+      const results = await Promise.all(
+        assetsToFetch.map(async ({ asset, symbol, cacheKey }) => {
+          try {
+            const chart = await FetchPriceTimeline({ symbol, timeline: timelineKey });
+            const sanitizedSeries = Array.isArray(chart?.series)
+              ? chart.series.filter((point) => {
+                  const close = Number(point?.close ?? point?.value ?? point?.price);
+                  return Number.isFinite(close) && close > 0;
+                })
+              : [];
+
+            if (sanitizedSeries.length === 0) {
+              return { asset, symbol, error: new Error('No valid price points returned.') };
+            }
+
+            const adjustedChart = {
+              ...chart,
+              series: sanitizedSeries,
+            };
+            timelineCacheRef.current.set(cacheKey, adjustedChart);
+            return { asset, symbol, chart: adjustedChart };
+          } catch (error) {
+            return { asset, symbol, error };
+          }
+        }),
+      );
 
       if (cancelled) {
         return;
       }
 
-      const successful = resolved.filter((entry) => entry && entry.chart);
-      const failures = resolved.filter((entry) => entry && entry.error);
+      const combined = new Map();
+      cachedEntries.forEach((entry) => {
+        combined.set(entry.symbol, { asset: entry.asset, chart: entry.chart });
+      });
 
-      setTimelineSources(successful.map(({ asset, chart }) => ({ asset, chart })));
-      setTimelineError(failures.length > 0 ? failures.map((entry) => ({
-        symbol: String(entry.asset?.symbol || "").trim().toUpperCase(),
-        message: entry.error?.message || "Failed to load timeline.",
-      })) : null);
+      const failures = [];
+
+      results.forEach((result) => {
+        if (result.chart) {
+          combined.set(result.symbol, { asset: result.asset, chart: result.chart });
+        } else if (result.error) {
+          failures.push({
+            symbol: result.symbol,
+            message: result.error?.message || 'Failed to load timeline.',
+          });
+        }
+      });
+
+      const ordered = normalizedAssets
+        .map((entry) => combined.get(entry.symbol) || null)
+        .filter(Boolean);
+
+      setTimelineSources(ordered);
+      setTimelineError(failures.length > 0 ? failures : null);
       setTimelineLoading(false);
     };
 
@@ -259,10 +334,9 @@ export default function PerformanceChart({ assets, totalValue, isLoading, setPer
     });
   }, [aggregatedSeriesUSD, convert]);
 
-  const isChartLoading = isLoading || timelineLoading;
-
   const hasChartData = chartData.length > 0;
   const hasTimelineError = Array.isArray(timelineError) && timelineError.length > 0;
+  const isChartLoading = isLoading || (timelineLoading && !hasChartData);
 
   const convertedTotalValue = useMemo(() => {
     const numeric = Number(totalValue);
