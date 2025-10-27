@@ -4,9 +4,74 @@ import { AreaChart, Area, XAxis, YAxis, Tooltip, ResponsiveContainer } from 'rec
 import { useCurrency } from "@/context/CurrencyContext.jsx";
 import { FetchPriceTimeline } from "@/integrations/Core.js";
 
-const timelineOptions = ["1D", "1W", "1M", "3M", "YTD", "1Y", "5Y", "All"];
-const MAGNITUDE_SUFFIXES = ['', 'K', 'M', 'B', 'T', 'Q'];
+const niceNumber = (range, round) => {
+  if (!Number.isFinite(range) || range <= 0) {
+    return 0;
+  }
+  const exponent = Math.floor(Math.log10(range));
+  const fraction = range / 10 ** exponent;
+  let niceFraction;
+  if (round) {
+    if (fraction < 1.5) niceFraction = 1;
+    else if (fraction < 3) niceFraction = 2;
+    else if (fraction < 7) niceFraction = 5;
+    else niceFraction = 10;
+  } else {
+    if (fraction <= 1) niceFraction = 1;
+    else if (fraction <= 2) niceFraction = 2;
+    else if (fraction <= 5) niceFraction = 5;
+    else niceFraction = 10;
+  }
+  return niceFraction * 10 ** exponent;
+};
 
+const computeNiceScale = (minValue, maxValue, maxTickCount = 6) => {
+  if (!Number.isFinite(minValue) || !Number.isFinite(maxValue)) {
+    return { domain: [0, 1], ticks: [0, 1], step: 1 };
+  }
+  if (maxValue < minValue) {
+    const temp = maxValue;
+    maxValue = minValue;
+    minValue = temp;
+  }
+  if (maxValue === minValue) {
+    const adjustment = Math.abs(maxValue) * 0.05 || 1;
+    minValue = Math.max(0, minValue - adjustment);
+    maxValue = maxValue + adjustment;
+  }
+  const range = maxValue - minValue;
+  const niceRange = niceNumber(range, false) || range || 1;
+  let step = niceNumber(niceRange / Math.max(1, maxTickCount - 1), true) || niceRange;
+  if (!Number.isFinite(step) || step <= 0) {
+    step = niceRange || 1;
+  }
+  let tickMin = Math.floor(minValue / step) * step;
+  let tickMax = Math.ceil(maxValue / step) * step;
+  if (tickMin < 0) tickMin = 0;
+  if (tickMax <= tickMin) tickMax = tickMin + step;
+  const ticks = [];
+  for (let value = tickMin; value <= tickMax + step * 0.5; value += step) {
+    ticks.push(Number(value.toFixed(6)));
+  }
+  if (ticks.length === 0) {
+    ticks.push(tickMin, tickMax);
+  }
+  return { domain: [tickMin, tickMax], ticks, step };
+};
+
+const determineFractionDigits = (step) => {
+  if (!Number.isFinite(step) || step <= 0) {
+    return 0;
+  }
+  const absStep = Math.abs(step);
+  if (absStep >= 1) return 0;
+  if (absStep >= 0.1) return 1;
+  if (absStep >= 0.01) return 2;
+  if (absStep >= 0.001) return 3;
+  return 4;
+};
+
+const timelineOptions = ["1D", "1W", "1M", "3M", "YTD", "1Y", "5Y", "All"];
 export default function PerformanceChart({ assets, totalValue, isLoading, setPerformanceSign = () => {}, totalDayChange }) {
   const { format, convert, currency, symbol } = useCurrency();
   const [activeTimeline, setActiveTimeline] = useState("1D");
@@ -115,11 +180,12 @@ export default function PerformanceChart({ assets, totalValue, isLoading, setPer
       const normalizedAssets = assets
         .map((asset) => {
           const symbol = String(asset?.symbol || '').trim().toUpperCase();
-          if (!symbol) {
+          const quantity = Number(asset?.quantity) || 0;
+          if (!symbol || !Number.isFinite(quantity) || quantity <= 0) {
             return null;
           }
           const cacheKey = `${timelineKey}:${symbol}`;
-          return { asset, symbol, cacheKey };
+          return { asset, symbol, cacheKey, quantity };
         })
         .filter(Boolean);
 
@@ -355,6 +421,29 @@ export default function PerformanceChart({ assets, totalValue, isLoading, setPer
     });
   }, [aggregatedSeriesUSD, convert]);
 
+  const axisConfig = useMemo(() => {
+    if (chartData.length === 0) {
+      return { domain: [0, 1], ticks: [0, 1], step: 1 };
+    }
+    const values = chartData
+      .map((point) => Number(point.value))
+      .filter((value) => Number.isFinite(value));
+    if (values.length === 0) {
+      return { domain: [0, 1], ticks: [0, 1], step: 1 };
+    }
+    let minVal = Math.min(...values);
+    let maxVal = Math.max(...values);
+    if (!Number.isFinite(minVal) || !Number.isFinite(maxVal)) {
+      return { domain: [0, 1], ticks: [0, 1], step: 1 };
+    }
+    const padding = Math.max((maxVal - minVal) * 0.04, 0);
+    if (padding > 0) {
+      minVal = Math.max(0, minVal - padding);
+      maxVal = maxVal + padding;
+    }
+    return computeNiceScale(minVal, maxVal);
+  }, [chartData]);
+
   const hasChartData = chartData.length > 0;
   const hasTimelineError = Array.isArray(timelineError) && timelineError.length > 0;
   const isChartLoading = isLoading || (timelineLoading && !hasChartData);
@@ -374,37 +463,21 @@ export default function PerformanceChart({ assets, totalValue, isLoading, setPer
     [format, currency],
   );
 
+  const axisFractionDigits = useMemo(() => determineFractionDigits(axisConfig.step), [axisConfig.step]);
+
   const formatAxisTick = useCallback(
     (raw) => {
       const value = Number(raw);
       if (!Number.isFinite(value)) {
         return "";
       }
-      if (value === 0) {
-        return `${symbol}0`;
-      }
-      const absValue = Math.abs(value);
-      if (absValue < 1) {
-        return formatDisplay(value, {
-          minimumFractionDigits: 0,
-          maximumFractionDigits: 2,
-        });
-      }
-      if (absValue < 1000) {
-        const rounded = Math.floor(absValue);
-        return `${value < 0 ? '-' : ''}${symbol}${rounded}`;
-      }
-
-      const magnitude = Math.floor(Math.log10(absValue));
-      const suffixIndex = Math.min(Math.floor(magnitude / 3), MAGNITUDE_SUFFIXES.length - 1);
-      const scaled = absValue / (10 ** (suffixIndex * 3));
-      const firstDigit = Math.floor(scaled).toString().charAt(0) || '0';
-      const suffix = MAGNITUDE_SUFFIXES[suffixIndex];
-      const prefix = value < 0 ? '-' : '';
-
-      return `${prefix}${symbol}${firstDigit}${suffix}`;
+      const fractionDigits = Math.min(axisFractionDigits, 2);
+      return formatDisplay(value, {
+        minimumFractionDigits: fractionDigits,
+        maximumFractionDigits: fractionDigits,
+      });
     },
-    [formatDisplay, symbol],
+    [formatDisplay, axisFractionDigits],
   );
 
   useEffect(() => {
@@ -420,19 +493,6 @@ export default function PerformanceChart({ assets, totalValue, isLoading, setPer
   useEffect(() => {
     setHoverData(null);
   }, [activeTimeline, currency]);
-
-  const chartMinRaw = chartData.length > 0
-    ? Math.min(...chartData.map((d) => d.value)) * 0.98
-    : convertedTotalValue * 0.98;
-
-  const chartMaxRaw = chartData.length > 0
-    ? Math.max(...chartData.map((d) => d.value)) * 1.02
-    : convertedTotalValue * 1.02;
-
-  const domainMin = Number.isFinite(chartMinRaw) ? Math.max(chartMinRaw, 0) : 0;
-  const domainMax = Number.isFinite(chartMaxRaw)
-    ? Math.max(chartMaxRaw, domainMin > 0 ? domainMin * 1.05 : 1)
-    : (domainMin > 0 ? domainMin * 1.05 : 1);
 
   const initialValue = chartData.length > 0 ? chartData[0].value : convertedTotalValue;
   const latestValue = chartData.length > 0 ? chartData[chartData.length - 1].value : convertedTotalValue;
@@ -516,7 +576,8 @@ export default function PerformanceChart({ assets, totalValue, isLoading, setPer
               </defs>
               <Tooltip contentStyle={{ display: 'none' }} />
               <YAxis
-                domain={[domainMin, domainMax]}
+                domain={axisConfig.domain}
+                ticks={axisConfig.ticks}
                 tickFormatter={formatAxisTick}
                 stroke="var(--text-color-secondary)"
                 fontSize={12}
