@@ -1,12 +1,12 @@
-﻿import React from 'react';
+﻿import React, { Suspense } from 'react';
 import { Routes, Route, Navigate } from 'react-router-dom';
 import Layout from './Layout.jsx';
-import Dashboard from './pages/Dashboard.jsx';
-import AssetDetail from './pages/AssetDetail.jsx';
-import Portfolio from './pages/Portfolio.jsx';
-import Settings from './pages/Settings.jsx';
-import Onboarding from './pages/Onboarding.jsx';
-import Login from './pages/Login.jsx';
+const DashboardPage = React.lazy(() => import('./pages/Dashboard.jsx'));
+const PortfolioPage = React.lazy(() => import('./pages/Portfolio.jsx'));
+const AssetDetailPage = React.lazy(() => import('./pages/AssetDetail.jsx'));
+const SettingsPage = React.lazy(() => import('./pages/Settings.jsx'));
+const OnboardingPage = React.lazy(() => import('./pages/Onboarding.jsx'));
+const LoginPage = React.lazy(() => import('./pages/Login.jsx'));
 import { useAuth } from '@/context/AuthContext.jsx';
 
 const LayoutRoute = ({ pageName, children }) => (
@@ -47,7 +47,9 @@ export default function App() {
         path="/login"
         element={(
           <PublicOnlyRoute>
-            <Login />
+            <Suspense fallback={<LoadingScreen message="Preparing Prism AI..." />}>
+              <LoginPage />
+            </Suspense>
           </PublicOnlyRoute>
         )}
       />
@@ -55,9 +57,11 @@ export default function App() {
         path="/dashboard"
         element={(
           <PrivateRoute>
-            <LayoutRoute pageName="Dashboard">
-              <Dashboard />
-            </LayoutRoute>
+            <Suspense fallback={<LoadingScreen message="Loading dashboard..." />}>
+              <LayoutRoute pageName="Dashboard">
+                <DashboardPage />
+              </LayoutRoute>
+            </Suspense>
           </PrivateRoute>
         )}
       />
@@ -65,9 +69,11 @@ export default function App() {
         path="/portfolio"
         element={(
           <PrivateRoute>
-            <LayoutRoute pageName="Portfolio">
-              <Portfolio />
-            </LayoutRoute>
+            <Suspense fallback={<LoadingScreen message="Loading portfolio..." />}>
+              <LayoutRoute pageName="Portfolio">
+                <PortfolioPage />
+              </LayoutRoute>
+            </Suspense>
           </PrivateRoute>
         )}
       />
@@ -75,9 +81,11 @@ export default function App() {
         path="/asset-detail"
         element={(
           <PrivateRoute>
-            <LayoutRoute pageName="Portfolio">
-              <AssetDetail />
-            </LayoutRoute>
+            <Suspense fallback={<LoadingScreen message="Loading asset..." />}>
+              <LayoutRoute pageName="Portfolio">
+                <AssetDetailPage />
+              </LayoutRoute>
+            </Suspense>
           </PrivateRoute>
         )}
       />
@@ -85,9 +93,11 @@ export default function App() {
         path="/settings"
         element={(
           <PrivateRoute>
-            <LayoutRoute pageName="Settings">
-              <Settings />
-            </LayoutRoute>
+            <Suspense fallback={<LoadingScreen message="Loading settings..." />}>
+              <LayoutRoute pageName="Settings">
+                <SettingsPage />
+              </LayoutRoute>
+            </Suspense>
           </PrivateRoute>
         )}
       />
@@ -95,7 +105,9 @@ export default function App() {
         path="/onboarding"
         element={(
           <PrivateRoute>
-            <Onboarding />
+            <Suspense fallback={<LoadingScreen message="Loading onboarding..." />}>
+              <OnboardingPage />
+            </Suspense>
           </PrivateRoute>
         )}
       />
