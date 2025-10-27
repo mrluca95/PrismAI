@@ -3,6 +3,14 @@ import { Asset } from '@/entities/Asset';
 const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL || '').replace(/\/?$/, '');
 const HAS_BACKEND = Boolean(API_BASE_URL);
 const FALLBACK_UPLOAD_STORE = new Map();
+const MAX_BACKEND_RETRIES = 3;
+
+
+const BACKEND_RETRYABLE_STATUS = new Set([502, 503, 504, 521, 522, 523, 524]);
+const BACKEND_WARMUP_ENDPOINT = '/api/health';
+const BACKEND_WARMUP_THROTTLE_MS = 15000;
+let backendWarmupPromise = null;
+let backendWarmupLast = 0;
 
 const delay = (ms = 120) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -13,30 +21,89 @@ const randomId = () => {
   return `id-${Date.now()}-${Math.random().toString(16).slice(2, 10)}`;
 };
 
-async function requestJson(path, { method = 'POST', body, headers = {} } = {}) {
+async function warmBackendIfNeeded({ force = false } = {}) {
+  if (!HAS_BACKEND) {
+    return;
+  }
+  const now = Date.now();
+  if (!force && backendWarmupPromise) {
+    return backendWarmupPromise;
+  }
+  if (!force && backendWarmupLast && (now - backendWarmupLast) < BACKEND_WARMUP_THROTTLE_MS) {
+    return backendWarmupPromise;
+  }
+  backendWarmupLast = now;
+  const url = `${API_BASE_URL}${BACKEND_WARMUP_ENDPOINT}`;
+  backendWarmupPromise = fetch(url, { method: 'GET', credentials: 'include', cache: 'no-store' })
+    .catch((error) => {
+      console.warn('[Core] backend warmup failed', error?.message || error);
+    })
+    .finally(() => {
+      backendWarmupPromise = null;
+    });
+  return backendWarmupPromise;
+}
+
+async function requestJson(path, options = {}) {
+  const { method = 'POST', body, headers = {} } = options;
+
   if (!HAS_BACKEND) {
     throw new Error('API base URL is not configured. Set VITE_API_BASE_URL to your backend URL.');
   }
 
-  const response = await fetch(`${API_BASE_URL}${path}`, {
-    method,
-    headers: {
-      Accept: 'application/json',
-      ...headers,
-    },
-    body,
-    credentials: 'include',
-  });
+  let lastError = null;
 
-  const text = await response.text();
-  let data;
-  try {
-    data = text ? JSON.parse(text) : {};
-  } catch (parseError) {
-    throw new Error(text || 'Received non-JSON response from server');
-  }
+  await warmBackendIfNeeded();
 
-  if (!response.ok) {
+  for (let attempt = 0; attempt < MAX_BACKEND_RETRIES; attempt += 1) {
+    let response;
+    try {
+      response = await fetch(`${API_BASE_URL}${path}`, {
+        method,
+        headers: {
+          Accept: 'application/json',
+          ...headers,
+        },
+        body,
+        credentials: 'include',
+      });
+    } catch (networkError) {
+      const isLastAttempt = attempt >= MAX_BACKEND_RETRIES - 1;
+      lastError = networkError;
+      if (!isLastAttempt) {
+        await warmBackendIfNeeded({ force: true });
+        await delay(600);
+        continue;
+      }
+      const friendly = new Error('Unable to reach Prism AI right now. Please wait a moment and try again.');
+      friendly.code = 'NETWORK_UNAVAILABLE';
+      friendly.cause = networkError;
+      throw friendly;
+    }
+
+    if (BACKEND_RETRYABLE_STATUS.has(response.status) && attempt < MAX_BACKEND_RETRIES - 1) {
+      await warmBackendIfNeeded({ force: true });
+      await delay(600);
+      continue;
+    }
+
+    const textBody = await response.text();
+    let data;
+    try {
+      data = textBody ? JSON.parse(textBody) : {};
+    } catch (parseError) {
+      if (response.ok) {
+        return {};
+      }
+      const error = new Error(textBody || 'Received non-JSON response from server');
+      error.status = response.status;
+      throw error;
+    }
+
+    if (response.ok) {
+      return data;
+    }
+
     const message = data?.message || data?.error || response.statusText || 'Request failed';
     const error = new Error(message);
     error.status = response.status;
@@ -48,10 +115,22 @@ async function requestJson(path, { method = 'POST', body, headers = {} } = {}) {
         error.details = data.details;
       }
     }
+
+    const isLastAttempt = attempt >= MAX_BACKEND_RETRIES - 1;
+    if (!isLastAttempt && BACKEND_RETRYABLE_STATUS.has(response.status)) {
+      lastError = error;
+      await warmBackendIfNeeded({ force: true });
+      await delay(600);
+      continue;
+    }
+
     throw error;
   }
 
-  return data;
+  if (lastError) {
+    throw lastError;
+  }
+  throw new Error('Request failed');
 }
 
 // ----------------------
