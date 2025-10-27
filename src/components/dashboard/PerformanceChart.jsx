@@ -167,7 +167,7 @@ export default function PerformanceChart({ assets, totalValue, isLoading, setPer
       }
 
       const results = await Promise.all(
-        assetsToFetch.map(async ({ asset, symbol, cacheKey }) => {
+        assetsToFetch.map(async ({ asset, symbol, cacheKey, quantity }) => {
           try {
             const chart = await FetchPriceTimeline({ symbol, timeline: timelineKey });
             const sanitizedSeries = Array.isArray(chart?.series)
@@ -181,12 +181,33 @@ export default function PerformanceChart({ assets, totalValue, isLoading, setPer
               return { asset, symbol, error: new Error('No valid price points returned.') };
             }
 
+            const assetPrice = Number(asset?.current_price);
+            const lastClose = Number(sanitizedSeries[sanitizedSeries.length - 1]?.close);
+            let scale = 1;
+            if (Number.isFinite(assetPrice) && assetPrice > 0 && Number.isFinite(lastClose) && lastClose > 0) {
+              const computedScale = assetPrice / lastClose;
+              if (Number.isFinite(computedScale) && computedScale > 0) {
+                scale = computedScale;
+              }
+            }
+
+            const adjustedSeries = sanitizedSeries.map((point) => {
+              const rawClose = Number(point?.close ?? point?.value ?? point?.price);
+              const scaled = Number.isFinite(rawClose) ? rawClose * scale : rawClose;
+              return {
+                ...point,
+                close: Number.isFinite(scaled) ? Number(scaled.toFixed(6)) : scaled,
+              };
+            });
+
+            const chartCurrency = String(chart?.currency || asset?.currency || 'USD').toUpperCase();
             const adjustedChart = {
               ...chart,
-              series: sanitizedSeries,
+              currency: chartCurrency,
+              series: adjustedSeries,
             };
             timelineCacheRef.current.set(cacheKey, adjustedChart);
-            return { asset, symbol, chart: adjustedChart };
+            return { asset, symbol, chart: adjustedChart, quantity };
           } catch (error) {
             return { asset, symbol, error };
           }
