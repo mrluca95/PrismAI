@@ -72,244 +72,169 @@ const determineFractionDigits = (step) => {
 };
 
 const timelineOptions = ["1D", "1W", "1M", "3M", "YTD", "1Y", "5Y", "All"];
-export default function PerformanceChart({ assets, totalValue, isLoading, setPerformanceSign = () => {}, totalDayChange }) {
-  const { format, convert, currency, symbol } = useCurrency();
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+const TIMELINE_SEGMENTS = {
+  "1D": 24,
+  "1W": 32,
+  "1M": 36,
+  "3M": 48,
+  "YTD": 60,
+  "1Y": 72,
+  "5Y": 80,
+  All: 120,
+};
+
+const buildLinearSeries = (startDate, startValue, endDate, endValue, segments = 60) => {
+  const safeStartDate = startDate ? new Date(startDate) : new Date(endDate.getTime() - DAY_MS * 30);
+  const safeEndDate = endDate ? new Date(endDate) : new Date();
+  const startTime = safeStartDate.getTime();
+  const endTime = Math.max(safeEndDate.getTime(), startTime + 1);
+  const safeStartValue = Number.isFinite(startValue) ? startValue : Number(endValue) || 0;
+  const safeEndValue = Number.isFinite(endValue) ? endValue : safeStartValue;
+  const count = Math.max(segments, 2);
+  const series = [];
+
+  for (let index = 0; index < count; index += 1) {
+    const ratio = count <= 1 ? 1 : index / (count - 1);
+    const timestamp = new Date(startTime + (endTime - startTime) * ratio);
+    const value = safeStartValue + (safeEndValue - safeStartValue) * ratio;
+    series.push({
+      date: timestamp,
+      valueUSD: Number.isFinite(value) ? value : safeStartValue,
+    });
+  }
+
+  return series;
+};
+
+const findPreviousPoint = (points, latestDate) => {
+  if (!points || points.length === 0) {
+    return null;
+  }
+  const latestTime = latestDate ? new Date(latestDate).getTime() : points[points.length - 1].date.getTime();
+  const targetTime = latestTime - DAY_MS;
+  for (let index = points.length - 2; index >= 0; index -= 1) {
+    if (points[index].date.getTime() <= targetTime) {
+      return points[index];
+    }
+  }
+  return points.length > 1 ? points[points.length - 2] : points[0];
+};
+
+const getTimelineCutoff = (timeline, latestDate) => {
+  const end = latestDate ? new Date(latestDate) : new Date();
+  switch (timeline) {
+    case "1W":
+      return new Date(end.getTime() - 7 * DAY_MS);
+    case "1M":
+      return new Date(end.getTime() - 30 * DAY_MS);
+    case "3M":
+      return new Date(end.getTime() - 90 * DAY_MS);
+    case "YTD":
+      return new Date(end.getFullYear(), 0, 1);
+    case "1Y":
+      return new Date(end.getTime() - 365 * DAY_MS);
+    case "5Y":
+      return new Date(end.getTime() - 5 * 365 * DAY_MS);
+    case "All":
+    default:
+      return new Date(0);
+  }
+};
+
+export default function PerformanceChart({ assets, totalValue, isLoading, setPerformanceSign = () => {} }) {
+  const { format, convert, currency } = useCurrency();
   const [activeTimeline, setActiveTimeline] = useState("1D");
   const [hoverData, setHoverData] = useState(null);
 
-  const [timelineSources, setTimelineSources] = useState([]);
-  const [timelineLoading, setTimelineLoading] = useState(false);
-  const [timelineError, setTimelineError] = useState(null);
-  const timelineCacheRef = useRef(new Map());
-  const [isSyncComplete, setIsSyncComplete] = useState(false);
-  const [expectedSymbols, setExpectedSymbols] = useState(0);
-
-  const syntheticSeriesUSD = useMemo(() => {
-    if (isLoading || !assets || assets.length === 0) {
-      return [];
-    }
-
-    const generateData = (days, stepDays) => {
-      const points = [];
-      let changeForPeriod = 0;
-
-      if (activeTimeline === "1D") {
-        changeForPeriod = totalDayChange || 0;
-      } else {
-        changeForPeriod = assets.reduce((sum, asset) => sum + (asset.gain_loss || 0), 0);
-      }
-
-      const startValue = Math.max(0, Number(totalValue) - changeForPeriod);
-      const safeStart = Number.isFinite(startValue) ? startValue : 0;
-      const totalNumeric = Number(totalValue) || 0;
-      const trendPerDay = days > 0 ? (totalNumeric - safeStart) / days : 0;
-      const now = new Date();
-      const steps = Math.max(2, Math.ceil(days / stepDays));
-
-      for (let index = 0; index < steps; index += 1) {
-        const progress = steps <= 1 ? 1 : index / (steps - 1);
-        const date = new Date(now.getTime() - (days * (1 - progress)) * 24 * 60 * 60 * 1000);
-
-        let value;
-        if (index === 0) {
-          value = safeStart;
-        } else {
-          const volatilityFactor = 0.015;
-          const noise = (Math.random() - 0.5) * volatilityFactor * safeStart;
-          value = Math.max(0, safeStart + trendPerDay * (days * progress) + noise);
-        }
-
-        points.push({
-          date,
-          value: Number.isFinite(value) ? Number(value.toFixed(2)) : 0,
-        });
-      }
-
-      if (points.length > 0) {
-        points[points.length - 1] = { date: new Date(), value: Number(totalNumeric.toFixed(2)) || 0 };
-      }
-
-      return points;
-    };
-
-    switch (activeTimeline) {
-      case "1D":
-        return generateData(1, 1 / 24);
-      case "1W":
-        return generateData(7, 1);
-      case "1M":
-        return generateData(30, 2);
-      case "3M":
-        return generateData(90, 3);
-      case "YTD": {
-        const startOfYear = new Date(new Date().getFullYear(), 0, 1);
-        const today = new Date();
-        const daysSinceYTD = Math.max(1, Math.floor((today - startOfYear) / (1000 * 60 * 60 * 24)));
-        return generateData(daysSinceYTD, Math.max(1, Math.ceil(daysSinceYTD / 30)));
-      }
-      case "1Y":
-        return generateData(365, 7);
-      case "5Y":
-        return generateData(365 * 5, 30);
-      case "All":
-        return generateData(365 * 2, 30);
-      default:
-        return generateData(30, 2);
-    }
-  }, [activeTimeline, assets, isLoading, totalDayChange, totalValue]);
+  const [snapshotEntries, setSnapshotEntries] = useState([]);
+  const [snapshotsLoading, setSnapshotsLoading] = useState(false);
+  const [snapshotsError, setSnapshotsError] = useState(null);
+  const snapshotCacheRef = useRef(new Map());
 
   useEffect(() => {
     let cancelled = false;
-    setIsSyncComplete(false);
-    setExpectedSymbols(0);
 
-    const load = async () => {
+    const loadSnapshots = async () => {
       if (isLoading) {
         if (!cancelled) {
-          setTimelineLoading(true);
+          setSnapshotsLoading(true);
         }
         return;
       }
 
       if (!assets || assets.length === 0) {
         if (!cancelled) {
-          setTimelineSources([]);
-          setTimelineError(null);
-          setTimelineLoading(false);
-          setExpectedSymbols(0);
-          setIsSyncComplete(true);
+          setSnapshotEntries([]);
+          setSnapshotsError(null);
+          setSnapshotsLoading(false);
         }
         return;
       }
 
-      const timelineKey = activeTimeline.toUpperCase();
-      const buckets = [];
-      const bucketMap = new Map();
+      const symbols = [...new Set(assets.map((asset) => String(asset?.symbol || "").trim().toUpperCase()).filter(Boolean))];
 
-      assets.forEach((asset) => {
-        const symbol = String(asset?.symbol || '').trim().toUpperCase();
-        const quantity = Number(asset?.quantity) || 0;
-        if (!symbol || !Number.isFinite(quantity) || quantity <= 0) {
-          return;
-        }
-        let bucket = bucketMap.get(symbol);
-        if (!bucket) {
-          bucket = {
-            symbol,
-            cacheKey: `${timelineKey}:${symbol}`,
-            totalQuantity: 0,
-            assets: [],
-            primaryAsset: asset,
-          };
-          bucketMap.set(symbol, bucket);
-          buckets.push(bucket);
-        }
-        bucket.totalQuantity += quantity;
-        bucket.assets.push(asset);
-      });
-
-      if (!cancelled) {
-        setExpectedSymbols(buckets.length);
-      }
-
-      if (buckets.length === 0) {
+      if (symbols.length === 0) {
         if (!cancelled) {
-          setTimelineSources([]);
-          setTimelineError(null);
-          setTimelineLoading(false);
-          setIsSyncComplete(true);
-        }
-        return;
-      }
-
-      const cachedCharts = new Map();
-      const assetsToFetch = [];
-
-      buckets.forEach((bucket) => {
-        const cached = timelineCacheRef.current.get(bucket.cacheKey);
-        if (cached) {
-          cachedCharts.set(bucket.symbol, cached);
-        } else {
-          assetsToFetch.push(bucket);
-        }
-      });
-
-      if (!cancelled) {
-        const partialSources = buckets
-          .map((bucket) => {
-            const cachedChart = cachedCharts.get(bucket.symbol);
-            if (!cachedChart) {
-              return null;
-            }
-            return {
-              symbol: bucket.symbol,
-              chart: cachedChart,
-              totalQuantity: bucket.totalQuantity,
-              primaryAsset: bucket.primaryAsset,
-              assets: bucket.assets,
-            };
-          })
-          .filter(Boolean);
-        setTimelineSources(partialSources);
-        setTimelineError(null);
-      }
-
-      if (assetsToFetch.length === 0) {
-        if (!cancelled) {
-          setTimelineLoading(false);
-          setIsSyncComplete(true);
+          setSnapshotEntries([]);
+          setSnapshotsError(null);
+          setSnapshotsLoading(false);
         }
         return;
       }
 
       if (!cancelled) {
-        setTimelineLoading(true);
+        setSnapshotsLoading(true);
+        setSnapshotsError(null);
       }
 
       const results = await Promise.all(
-        assetsToFetch.map(async (bucket) => {
+        symbols.map(async (symbol) => {
+          const cached = snapshotCacheRef.current.get(symbol);
+          if (cached) {
+            return { symbol, snapshot: cached };
+          }
+
           try {
-            const chart = await FetchPriceTimeline({ symbol: bucket.symbol, timeline: timelineKey });
-            const sanitizedSeries = Array.isArray(chart?.series)
-              ? chart.series.filter((point) => {
-                  const close = Number(point?.close ?? point?.value ?? point?.price);
-                  return Number.isFinite(close) && close > 0;
-                })
-              : [];
+            const chart = await FetchPriceTimeline({ symbol, timeline: "All" });
+            const rawSeries = Array.isArray(chart?.series) ? chart.series : [];
+            const parsedSeries = rawSeries
+              .map((point) => {
+                const timestamp = point?.timestamp || point?.date || point?.time;
+                const close = Number(point?.close ?? point?.value ?? point?.price);
+                if (!timestamp || !Number.isFinite(close)) {
+                  return null;
+                }
+                const date = new Date(timestamp);
+                if (Number.isNaN(date.getTime())) {
+                  return null;
+                }
+                return { date, price: close };
+              })
+              .filter(Boolean)
+              .sort((a, b) => a.date - b.date);
 
-            if (sanitizedSeries.length === 0) {
-              return { bucket, error: new Error('No valid price points returned.') };
+            if (parsedSeries.length === 0) {
+              throw new Error("No price data returned.");
             }
 
-            const assetPrice = Number(bucket.primaryAsset?.current_price);
-            const lastClose = Number(sanitizedSeries[sanitizedSeries.length - 1]?.close);
-            let scale = 1;
-            if (Number.isFinite(assetPrice) && assetPrice > 0 && Number.isFinite(lastClose) && lastClose > 0) {
-              const computedScale = assetPrice / lastClose;
-              if (Number.isFinite(computedScale) && computedScale > 0) {
-                scale = computedScale;
-              }
-            }
+            const earliest = parsedSeries[0];
+            const latest = parsedSeries[parsedSeries.length - 1];
+            const previous = findPreviousPoint(parsedSeries, latest.date) || earliest;
+            const chartCurrency = String(chart?.currency || "USD").toUpperCase();
 
-            const adjustedSeries = sanitizedSeries.map((point) => {
-              const rawClose = Number(point?.close ?? point?.value ?? point?.price);
-              const scaled = Number.isFinite(rawClose) ? rawClose * scale : rawClose;
-              return {
-                ...point,
-                close: Number.isFinite(scaled) ? Number(scaled.toFixed(6)) : scaled,
-              };
-            });
-
-            const chartCurrency = String(chart?.currency || bucket.primaryAsset?.currency || 'USD').toUpperCase();
-            const adjustedChart = {
-              ...chart,
+            const snapshot = {
+              symbol,
               currency: chartCurrency,
-              series: adjustedSeries,
+              earliest,
+              previous,
+              latest,
             };
-            timelineCacheRef.current.set(bucket.cacheKey, adjustedChart);
-            return { bucket, chart: adjustedChart };
+            snapshotCacheRef.current.set(symbol, snapshot);
+            return { symbol, snapshot };
           } catch (error) {
-            return { bucket, error };
+            return { symbol, error };
           }
         }),
       );
@@ -318,151 +243,171 @@ export default function PerformanceChart({ assets, totalValue, isLoading, setPer
         return;
       }
 
-      const resultMap = new Map();
+      const nextEntries = [];
       const failures = [];
 
       results.forEach((result) => {
-        if (result.chart) {
-          resultMap.set(result.bucket.symbol, result.chart);
+        if (result.snapshot) {
+          nextEntries.push(result.snapshot);
         } else if (result.error) {
           failures.push({
-            symbol: result.bucket.symbol,
-            message: result.error?.message || 'Failed to load timeline.',
+            symbol: result.symbol,
+            message: result.error?.message || "Failed to load price history.",
           });
         }
       });
 
-      const finalSources = buckets
-        .map((bucket) => {
-          const chart = resultMap.get(bucket.symbol) || cachedCharts.get(bucket.symbol);
-          if (!chart) {
-            return null;
-          }
-          return {
-            symbol: bucket.symbol,
-            chart,
-            totalQuantity: bucket.totalQuantity,
-            primaryAsset: bucket.primaryAsset,
-            assets: bucket.assets,
-          };
-        })
-        .filter(Boolean);
-
-      setTimelineSources(finalSources);
-      setTimelineError(failures.length > 0 ? failures : null);
-      setTimelineLoading(false);
-      setIsSyncComplete(true);
+      setSnapshotEntries(nextEntries);
+      setSnapshotsError(failures.length > 0 ? failures : null);
+      setSnapshotsLoading(false);
     };
 
-    load();
+    loadSnapshots();
 
     return () => {
       cancelled = true;
     };
-  }, [activeTimeline, assets, isLoading]);
+  }, [assets, isLoading]);
 
-  const aggregatedSeriesUSD = useMemo(() => {
-    if (timelineSources.length === 0) {
-      return syntheticSeriesUSD;
+  const aggregatedSnapshots = useMemo(() => {
+    if (!assets || assets.length === 0 || snapshotEntries.length === 0) {
+      return null;
     }
 
-    const assetSeries = timelineSources
-      .map(({ chart, totalQuantity, primaryAsset }) => {
-        const quantity = Number(totalQuantity) || 0;
-        if (!Number.isFinite(quantity) || quantity <= 0) {
+    const entryMap = new Map(snapshotEntries.map((entry) => [entry.symbol, entry]));
+    let earliestValueUSD = 0;
+    let previousValueUSD = 0;
+    let latestValueUSD = 0;
+    let earliestDate = null;
+    let previousDate = null;
+    let latestDate = null;
+
+    assets.forEach((asset) => {
+      const symbol = String(asset?.symbol || "").trim().toUpperCase();
+      const quantity = Number(asset?.quantity) || 0;
+      if (!symbol || !Number.isFinite(quantity) || quantity <= 0) {
+        return;
+      }
+      const entry = entryMap.get(symbol);
+      if (!entry) {
+        return;
+      }
+
+      const assetCurrency = String(entry.currency || asset?.currency || "USD").toUpperCase();
+
+      const convertPoint = (point) => {
+        if (!point || !Number.isFinite(point.price)) {
           return null;
         }
-        const assetCurrency = String(chart?.currency || primaryAsset?.currency || "USD").toUpperCase();
-        const rawSeries = Array.isArray(chart?.series) ? chart.series : [];
-        if (!Array.isArray(rawSeries) || rawSeries.length === 0) {
+        const total = convert(point.price * quantity, assetCurrency, "USD");
+        if (!Number.isFinite(total)) {
           return null;
         }
-        const normalizedPoints = rawSeries
-          .map((point) => {
-            const timestamp = point?.timestamp || point?.date || point?.time;
-            if (!timestamp) {
-              return null;
-            }
-            const date = new Date(timestamp);
-            if (Number.isNaN(date.getTime())) {
-              return null;
-            }
-            const close = Number(point?.close ?? point?.value ?? point?.price);
-            if (!Number.isFinite(close)) {
-              return null;
-            }
-            const valueUSD = convert(close * quantity, assetCurrency, "USD");
-            if (!Number.isFinite(valueUSD)) {
-              return null;
-            }
-            return { time: date.getTime(), valueUSD };
-          })
-          .filter(Boolean)
-          .sort((a, b) => a.time - b.time);
-
-        return normalizedPoints.length > 0 ? normalizedPoints : null;
-      })
-      .filter(Boolean);
-
-    if (assetSeries.length === 0) {
-      return syntheticSeriesUSD;
-    }
-
-    const timestamps = new Set();
-    assetSeries.forEach((series) => {
-      series.forEach((point) => {
-        timestamps.add(point.time);
-      });
-    });
-
-    if (timestamps.size === 0) {
-      return syntheticSeriesUSD;
-    }
-
-    const sortedTimes = Array.from(timestamps).sort((a, b) => a - b);
-    const states = assetSeries.map((series) => ({
-      series,
-      index: 0,
-      lastValue: null,
-    }));
-
-    const aggregated = sortedTimes.map((timeMs) => {
-      let total = 0;
-      states.forEach((state) => {
-        while (state.index < state.series.length && state.series[state.index].time <= timeMs) {
-          state.lastValue = state.series[state.index].valueUSD;
-          state.index += 1;
-        }
-        if (state.lastValue !== null) {
-          total += state.lastValue;
-        }
-      });
-      return { date: new Date(timeMs), value: total };
-    });
-
-    const numericTotal = Number(totalValue);
-    if (aggregated.length > 0 && Number.isFinite(numericTotal)) {
-      aggregated[aggregated.length - 1] = {
-        ...aggregated[aggregated.length - 1],
-        value: numericTotal,
+        return { date: point.date, total };
       };
-    } else if (aggregated.length === 0 && Number.isFinite(numericTotal) && numericTotal > 0) {
-      aggregated.push({ date: new Date(), value: numericTotal });
+
+      const earliestPoint = convertPoint(entry.earliest);
+      if (earliestPoint) {
+        earliestValueUSD += earliestPoint.total;
+        earliestDate = !earliestDate || earliestPoint.date < earliestDate ? earliestPoint.date : earliestDate;
+      }
+
+      const previousPoint = convertPoint(entry.previous);
+      if (previousPoint) {
+        previousValueUSD += previousPoint.total;
+        previousDate = !previousDate || previousPoint.date < previousDate ? previousPoint.date : previousDate;
+      }
+
+      const latestPoint = convertPoint(entry.latest);
+      if (latestPoint) {
+        latestValueUSD += latestPoint.total;
+        latestDate = !latestDate || latestPoint.date > latestDate ? latestPoint.date : latestDate;
+      }
+    });
+
+    if (!Number.isFinite(latestValueUSD) || latestValueUSD <= 0) {
+      return null;
     }
 
-    return aggregated.length > 0 ? aggregated : syntheticSeriesUSD;
-  }, [timelineSources, convert, totalValue, syntheticSeriesUSD]);
+    if (!earliestDate) {
+      earliestDate = new Date((latestDate || new Date()).getTime() - 365 * DAY_MS);
+    }
+    if (!previousDate) {
+      previousDate = new Date((latestDate || new Date()).getTime() - DAY_MS);
+      previousValueUSD = earliestValueUSD;
+    }
+
+    return {
+      earliestValueUSD,
+      earliestDate,
+      previousValueUSD: Number.isFinite(previousValueUSD) && previousValueUSD > 0 ? previousValueUSD : earliestValueUSD,
+      previousDate,
+      latestValueUSD,
+      latestDate: latestDate || new Date(),
+    };
+  }, [assets, snapshotEntries, convert]);
+
+  const longTermSeriesUSD = useMemo(() => {
+    if (!aggregatedSnapshots) {
+      return [];
+    }
+    return buildLinearSeries(
+      aggregatedSnapshots.earliestDate,
+      aggregatedSnapshots.earliestValueUSD,
+      aggregatedSnapshots.latestDate,
+      aggregatedSnapshots.latestValueUSD,
+      TIMELINE_SEGMENTS.All,
+    );
+  }, [aggregatedSnapshots]);
+
+  const intradaySeriesUSD = useMemo(() => {
+    if (!aggregatedSnapshots) {
+      return [];
+    }
+    const startDate = aggregatedSnapshots.previousDate || new Date(aggregatedSnapshots.latestDate.getTime() - DAY_MS);
+    return buildLinearSeries(
+      startDate,
+      aggregatedSnapshots.previousValueUSD,
+      aggregatedSnapshots.latestDate,
+      aggregatedSnapshots.latestValueUSD,
+      TIMELINE_SEGMENTS["1D"],
+    );
+  }, [aggregatedSnapshots]);
+
+  const convertSeries = useCallback(
+    (seriesUSD) =>
+      seriesUSD.map((point) => {
+        const convertedValue = convert(point.valueUSD, "USD");
+        return {
+          date: point.date,
+          value: Number.isFinite(convertedValue) ? Number(convertedValue.toFixed(2)) : 0,
+        };
+      }),
+    [convert],
+  );
 
   const chartData = useMemo(() => {
-    return aggregatedSeriesUSD.map((point) => {
-      const convertedValue = convert(point.value, "USD");
-      const safeValue = Number.isFinite(convertedValue) ? convertedValue : 0;
-      return {
-        date: point.date,
-        value: Number(safeValue.toFixed(2)),
-      };
-    });
-  }, [aggregatedSeriesUSD, convert]);
+    if (!aggregatedSnapshots) {
+      return [];
+    }
+
+    if (activeTimeline === "1D") {
+      return convertSeries(intradaySeriesUSD);
+    }
+
+    if (longTermSeriesUSD.length === 0) {
+      return [];
+    }
+
+    if (activeTimeline === "All") {
+      return convertSeries(longTermSeriesUSD);
+    }
+
+    const cutoff = getTimelineCutoff(activeTimeline, aggregatedSnapshots.latestDate);
+    const filtered = longTermSeriesUSD.filter((point) => point.date >= cutoff);
+    const safeSeries = filtered.length > 1 ? filtered : longTermSeriesUSD.slice(-2);
+    return convertSeries(safeSeries);
+  }, [activeTimeline, aggregatedSnapshots, convertSeries, intradaySeriesUSD, longTermSeriesUSD]);
 
   const axisConfig = useMemo(() => {
     if (chartData.length === 0) {
@@ -487,19 +432,11 @@ export default function PerformanceChart({ assets, totalValue, isLoading, setPer
     return computeNiceScale(minVal, maxVal);
   }, [chartData]);
 
-  const hasChartData = chartData.length > 0;
-  const hasTimelineError = Array.isArray(timelineError) && timelineError.length > 0;
-  const requiresSync = expectedSymbols > 0;
-  const quotesSynced =
-    (!requiresSync && !timelineLoading && !hasTimelineError) ||
-    (requiresSync &&
-      isSyncComplete &&
-      !timelineLoading &&
-      !hasTimelineError &&
-      timelineSources.length === expectedSymbols);
-  const showChartLoading = isLoading || (!quotesSynced && requiresSync);
-  const shouldShowChart = quotesSynced && hasChartData;
-  const shouldShowError = hasTimelineError && isSyncComplete && !timelineLoading;
+  const hasChartData = chartData.length > 1;
+  const hasSnapshotError = Array.isArray(snapshotsError) && snapshotsError.length > 0;
+  const showChartLoading = isLoading || snapshotsLoading;
+  const shouldShowChart = !showChartLoading && hasChartData;
+  const shouldShowError = !showChartLoading && !hasChartData && hasSnapshotError;
 
   const convertedTotalValue = useMemo(() => {
     const numeric = Number(totalValue);
