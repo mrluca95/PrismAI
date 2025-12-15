@@ -2,7 +2,6 @@
 import React, { useState, useMemo, useEffect, useCallback, useRef } from 'react';
 import { AreaChart, Area, XAxis, YAxis, Tooltip, ResponsiveContainer } from 'recharts';
 import { useCurrency } from "@/context/CurrencyContext.jsx";
-import { FetchPriceTimeline } from "@/integrations/Core.js";
 
 const niceNumber = (range, round) => {
   if (!Number.isFinite(range) || range <= 0) {
@@ -73,6 +72,10 @@ const determineFractionDigits = (step) => {
 
 const timelineOptions = ["1D", "1W", "1M", "3M", "YTD", "1Y", "5Y", "All"];
 const DAY_MS = 24 * 60 * 60 * 1000;
+const FREE_DATA_REFRESH_MS = 6 * 60 * 60 * 1000;
+const YAHOO_CHART_ENDPOINT = "https://query1.finance.yahoo.com/v8/finance/chart";
+const YAHOO_QUERY =
+  "range=max&interval=1d&includePrePost=false&lang=en-US&region=US&corsDomain=finance.yahoo.com";
 
 const TIMELINE_SEGMENTS = {
   "1D": 24,
@@ -108,20 +111,6 @@ const buildLinearSeries = (startDate, startValue, endDate, endValue, segments = 
   return series;
 };
 
-const findPreviousPoint = (points, latestDate) => {
-  if (!points || points.length === 0) {
-    return null;
-  }
-  const latestTime = latestDate ? new Date(latestDate).getTime() : points[points.length - 1].date.getTime();
-  const targetTime = latestTime - DAY_MS;
-  for (let index = points.length - 2; index >= 0; index -= 1) {
-    if (points[index].date.getTime() <= targetTime) {
-      return points[index];
-    }
-  }
-  return points.length > 1 ? points[points.length - 2] : points[0];
-};
-
 const getTimelineCutoff = (timeline, latestDate) => {
   const end = latestDate ? new Date(latestDate) : new Date();
   switch (timeline) {
@@ -141,6 +130,78 @@ const getTimelineCutoff = (timeline, latestDate) => {
     default:
       return new Date(0);
   }
+};
+
+const parseYahooSnapshot = (result) => {
+  const timestamps = Array.isArray(result?.timestamp) ? result.timestamp : [];
+  const quote = result?.indicators?.quote?.[0] || {};
+  const closes = Array.isArray(quote?.close) ? quote.close : [];
+  const currency = String(result?.meta?.currency || "USD").toUpperCase();
+
+  const pickFromStart = () => {
+    for (let index = 0; index < timestamps.length; index += 1) {
+      const close = Number(closes[index]);
+      if (Number.isFinite(close)) {
+        return { date: new Date(timestamps[index] * 1000), price: close };
+      }
+    }
+    return null;
+  };
+
+  const pickFromEnd = () => {
+    for (let index = timestamps.length - 1; index >= 0; index -= 1) {
+      const close = Number(closes[index]);
+      if (Number.isFinite(close)) {
+        return { index, point: { date: new Date(timestamps[index] * 1000), price: close } };
+      }
+    }
+    return null;
+  };
+
+  const earliest = pickFromStart();
+  const latestInfo = pickFromEnd();
+  if (!latestInfo || !latestInfo.point || !earliest) {
+    throw new Error("Incomplete price history returned.");
+  }
+
+  const findPrevious = () => {
+    for (let index = latestInfo.index - 1; index >= 0; index -= 1) {
+      const close = Number(closes[index]);
+      if (Number.isFinite(close)) {
+        return { date: new Date(timestamps[index] * 1000), price: close };
+      }
+    }
+    return earliest;
+  };
+
+  const previous = findPrevious();
+
+  return {
+    currency,
+    earliest,
+    previous,
+    latest: latestInfo.point,
+  };
+};
+
+const fetchYahooSnapshot = async (symbol) => {
+  const trimmed = String(symbol || "").trim().toUpperCase();
+  if (!trimmed) {
+    throw new Error("Invalid symbol");
+  }
+  const url = `${YAHOO_CHART_ENDPOINT}/${encodeURIComponent(trimmed)}?${YAHOO_QUERY}`;
+  const response = await fetch(url, { method: "GET", mode: "cors" });
+  if (!response.ok) {
+    throw new Error(`Yahoo Finance returned ${response.status}`);
+  }
+  const data = await response.json();
+  const result = data?.chart?.result?.[0];
+  if (!result) {
+    const err = data?.chart?.error?.description || "Chart data unavailable.";
+    throw new Error(err);
+  }
+  const snapshot = parseYahooSnapshot(result);
+  return { symbol: trimmed, ...snapshot, fetchedAt: Date.now() };
 };
 
 export default function PerformanceChart({ assets, totalValue, isLoading, setPerformanceSign = () => {} }) {
@@ -192,47 +253,24 @@ export default function PerformanceChart({ assets, totalValue, isLoading, setPer
       const results = await Promise.all(
         symbols.map(async (symbol) => {
           const cached = snapshotCacheRef.current.get(symbol);
-          if (cached) {
-            return { symbol, snapshot: cached };
+          if (cached && Date.now() - cached.fetchedAt < FREE_DATA_REFRESH_MS) {
+            return { symbol, snapshot: cached.snapshot };
           }
 
           try {
-            const chart = await FetchPriceTimeline({ symbol, timeline: "All" });
-            const rawSeries = Array.isArray(chart?.series) ? chart.series : [];
-            const parsedSeries = rawSeries
-              .map((point) => {
-                const timestamp = point?.timestamp || point?.date || point?.time;
-                const close = Number(point?.close ?? point?.value ?? point?.price);
-                if (!timestamp || !Number.isFinite(close)) {
-                  return null;
-                }
-                const date = new Date(timestamp);
-                if (Number.isNaN(date.getTime())) {
-                  return null;
-                }
-                return { date, price: close };
-              })
-              .filter(Boolean)
-              .sort((a, b) => a.date - b.date);
-
-            if (parsedSeries.length === 0) {
-              throw new Error("No price data returned.");
-            }
-
-            const earliest = parsedSeries[0];
-            const latest = parsedSeries[parsedSeries.length - 1];
-            const previous = findPreviousPoint(parsedSeries, latest.date) || earliest;
-            const chartCurrency = String(chart?.currency || "USD").toUpperCase();
-
-            const snapshot = {
-              symbol,
-              currency: chartCurrency,
-              earliest,
-              previous,
-              latest,
+            const snapshot = await fetchYahooSnapshot(symbol);
+            const normalized = {
+              symbol: snapshot.symbol,
+              currency: snapshot.currency,
+              earliest: snapshot.earliest,
+              previous: snapshot.previous,
+              latest: snapshot.latest,
             };
-            snapshotCacheRef.current.set(symbol, snapshot);
-            return { symbol, snapshot };
+            snapshotCacheRef.current.set(snapshot.symbol, {
+              snapshot: normalized,
+              fetchedAt: snapshot.fetchedAt || Date.now(),
+            });
+            return { symbol, snapshot: normalized };
           } catch (error) {
             return { symbol, error };
           }
@@ -258,7 +296,7 @@ export default function PerformanceChart({ assets, totalValue, isLoading, setPer
       });
 
       setSnapshotEntries(nextEntries);
-      setSnapshotsError(failures.length > 0 ? failures : null);
+      setSnapshotsError(nextEntries.length === 0 && failures.length > 0 ? failures : null);
       setSnapshotsLoading(false);
     };
 
