@@ -81,6 +81,8 @@ export default function PerformanceChart({ assets, totalValue, isLoading, setPer
   const [timelineLoading, setTimelineLoading] = useState(false);
   const [timelineError, setTimelineError] = useState(null);
   const timelineCacheRef = useRef(new Map());
+  const [isSyncComplete, setIsSyncComplete] = useState(false);
+  const [expectedSymbols, setExpectedSymbols] = useState(0);
 
   const syntheticSeriesUSD = useMemo(() => {
     if (isLoading || !assets || assets.length === 0) {
@@ -158,6 +160,8 @@ export default function PerformanceChart({ assets, totalValue, isLoading, setPer
 
   useEffect(() => {
     let cancelled = false;
+    setIsSyncComplete(false);
+    setExpectedSymbols(0);
 
     const load = async () => {
       if (isLoading) {
@@ -172,6 +176,8 @@ export default function PerformanceChart({ assets, totalValue, isLoading, setPer
           setTimelineSources([]);
           setTimelineError(null);
           setTimelineLoading(false);
+          setExpectedSymbols(0);
+          setIsSyncComplete(true);
         }
         return;
       }
@@ -202,11 +208,16 @@ export default function PerformanceChart({ assets, totalValue, isLoading, setPer
         bucket.assets.push(asset);
       });
 
+      if (!cancelled) {
+        setExpectedSymbols(buckets.length);
+      }
+
       if (buckets.length === 0) {
         if (!cancelled) {
           setTimelineSources([]);
           setTimelineError(null);
           setTimelineLoading(false);
+          setIsSyncComplete(true);
         }
         return;
       }
@@ -246,6 +257,7 @@ export default function PerformanceChart({ assets, totalValue, isLoading, setPer
       if (assetsToFetch.length === 0) {
         if (!cancelled) {
           setTimelineLoading(false);
+          setIsSyncComplete(true);
         }
         return;
       }
@@ -339,6 +351,7 @@ export default function PerformanceChart({ assets, totalValue, isLoading, setPer
       setTimelineSources(finalSources);
       setTimelineError(failures.length > 0 ? failures : null);
       setTimelineLoading(false);
+      setIsSyncComplete(true);
     };
 
     load();
@@ -476,7 +489,17 @@ export default function PerformanceChart({ assets, totalValue, isLoading, setPer
 
   const hasChartData = chartData.length > 0;
   const hasTimelineError = Array.isArray(timelineError) && timelineError.length > 0;
-  const isChartLoading = isLoading || (timelineLoading && !hasChartData);
+  const requiresSync = expectedSymbols > 0;
+  const quotesSynced =
+    (!requiresSync && !timelineLoading && !hasTimelineError) ||
+    (requiresSync &&
+      isSyncComplete &&
+      !timelineLoading &&
+      !hasTimelineError &&
+      timelineSources.length === expectedSymbols);
+  const showChartLoading = isLoading || (!quotesSynced && requiresSync);
+  const shouldShowChart = quotesSynced && hasChartData;
+  const shouldShowError = hasTimelineError && isSyncComplete && !timelineLoading;
 
   const convertedTotalValue = useMemo(() => {
     const numeric = Number(totalValue);
@@ -565,14 +588,6 @@ export default function PerformanceChart({ assets, totalValue, isLoading, setPer
     setHoverData(null);
   };
 
-  if (isChartLoading) {
-    return (
-        <div className="neomorph rounded-2xl p-6 animate-pulse">
-            <div className="h-64 bg-purple-200 dark:bg-gray-700 rounded-lg"></div>
-        </div>
-    );
-  }
-
   return (
     <div className="neomorph rounded-2xl p-4 md:p-6 space-y-4">
       <div>
@@ -590,7 +605,7 @@ export default function PerformanceChart({ assets, totalValue, isLoading, setPer
       </div>
       
       <div className="h-64">
-        {hasChartData ? (
+        {shouldShowChart ? (
           <ResponsiveContainer width="100%" height="100%">
             <AreaChart
               data={chartData}
@@ -628,21 +643,22 @@ export default function PerformanceChart({ assets, totalValue, isLoading, setPer
               <Area type="monotone" dataKey="value" stroke={isPositive ? "#10b981" : "#ef4444"} strokeWidth={2} fillOpacity={1} fill="url(#colorUv)" />
             </AreaChart>
           </ResponsiveContainer>
+        ) : showChartLoading ? (
+          <div className="h-full flex flex-col items-center justify-center space-y-4">
+            <div className="w-full h-40 rounded-xl bg-purple-200/40 dark:bg-gray-700/40 animate-pulse" />
+            <p className="text-sm text-purple-600">Syncing live price history...</p>
+          </div>
+        ) : shouldShowError ? (
+          <div className="h-full flex items-center justify-center text-sm text-red-600 text-center px-4">
+            Unable to load performance data for your holdings right now.
+          </div>
         ) : (
           <div className="h-full flex items-center justify-center text-sm text-purple-600 text-center px-4">
-            {hasTimelineError
-              ? "Unable to load performance data for your holdings right now."
-              : "Performance data will appear once pricing history becomes available."}
+            Performance data will appear once pricing history becomes available.
           </div>
         )}
       </div>
 
-      {hasTimelineError && hasChartData && (
-        <p className="text-xs text-purple-500 text-center">
-          Some holdings are missing price history right now. Displaying an estimated trend until quotes sync.
-        </p>
-      )}
-      
       {/* Mobile responsive timeline buttons */}
       <div className="flex justify-center">
         <div className="flex overflow-x-auto space-x-1 pb-1 scrollbar-hide max-w-full">
