@@ -177,19 +177,32 @@ export default function PerformanceChart({ assets, totalValue, isLoading, setPer
       }
 
       const timelineKey = activeTimeline.toUpperCase();
-      const normalizedAssets = assets
-        .map((asset) => {
-          const symbol = String(asset?.symbol || '').trim().toUpperCase();
-          const quantity = Number(asset?.quantity) || 0;
-          if (!symbol || !Number.isFinite(quantity) || quantity <= 0) {
-            return null;
-          }
-          const cacheKey = `${timelineKey}:${symbol}`;
-          return { asset, symbol, cacheKey, quantity };
-        })
-        .filter(Boolean);
+      const buckets = [];
+      const bucketMap = new Map();
 
-      if (normalizedAssets.length === 0) {
+      assets.forEach((asset) => {
+        const symbol = String(asset?.symbol || '').trim().toUpperCase();
+        const quantity = Number(asset?.quantity) || 0;
+        if (!symbol || !Number.isFinite(quantity) || quantity <= 0) {
+          return;
+        }
+        let bucket = bucketMap.get(symbol);
+        if (!bucket) {
+          bucket = {
+            symbol,
+            cacheKey: `${timelineKey}:${symbol}`,
+            totalQuantity: 0,
+            assets: [],
+            primaryAsset: asset,
+          };
+          bucketMap.set(symbol, bucket);
+          buckets.push(bucket);
+        }
+        bucket.totalQuantity += quantity;
+        bucket.assets.push(asset);
+      });
+
+      if (buckets.length === 0) {
         if (!cancelled) {
           setTimelineSources([]);
           setTimelineError(null);
@@ -198,26 +211,35 @@ export default function PerformanceChart({ assets, totalValue, isLoading, setPer
         return;
       }
 
-      const cachedEntries = [];
+      const cachedCharts = new Map();
       const assetsToFetch = [];
 
-      normalizedAssets.forEach((entry) => {
-        const cached = timelineCacheRef.current.get(entry.cacheKey);
+      buckets.forEach((bucket) => {
+        const cached = timelineCacheRef.current.get(bucket.cacheKey);
         if (cached) {
-          cachedEntries.push({ ...entry, chart: cached });
+          cachedCharts.set(bucket.symbol, cached);
         } else {
-          assetsToFetch.push(entry);
+          assetsToFetch.push(bucket);
         }
       });
 
       if (!cancelled) {
-        const orderedCached = normalizedAssets
-          .map((entry) => {
-            const match = cachedEntries.find((item) => item.symbol === entry.symbol);
-            return match ? { asset: match.asset, chart: match.chart } : null;
+        const partialSources = buckets
+          .map((bucket) => {
+            const cachedChart = cachedCharts.get(bucket.symbol);
+            if (!cachedChart) {
+              return null;
+            }
+            return {
+              symbol: bucket.symbol,
+              chart: cachedChart,
+              totalQuantity: bucket.totalQuantity,
+              primaryAsset: bucket.primaryAsset,
+              assets: bucket.assets,
+            };
           })
           .filter(Boolean);
-        setTimelineSources(orderedCached);
+        setTimelineSources(partialSources);
         setTimelineError(null);
       }
 
@@ -233,9 +255,9 @@ export default function PerformanceChart({ assets, totalValue, isLoading, setPer
       }
 
       const results = await Promise.all(
-        assetsToFetch.map(async ({ asset, symbol, cacheKey, quantity }) => {
+        assetsToFetch.map(async (bucket) => {
           try {
-            const chart = await FetchPriceTimeline({ symbol, timeline: timelineKey });
+            const chart = await FetchPriceTimeline({ symbol: bucket.symbol, timeline: timelineKey });
             const sanitizedSeries = Array.isArray(chart?.series)
               ? chart.series.filter((point) => {
                   const close = Number(point?.close ?? point?.value ?? point?.price);
@@ -244,10 +266,10 @@ export default function PerformanceChart({ assets, totalValue, isLoading, setPer
               : [];
 
             if (sanitizedSeries.length === 0) {
-              return { asset, symbol, error: new Error('No valid price points returned.') };
+              return { bucket, error: new Error('No valid price points returned.') };
             }
 
-            const assetPrice = Number(asset?.current_price);
+            const assetPrice = Number(bucket.primaryAsset?.current_price);
             const lastClose = Number(sanitizedSeries[sanitizedSeries.length - 1]?.close);
             let scale = 1;
             if (Number.isFinite(assetPrice) && assetPrice > 0 && Number.isFinite(lastClose) && lastClose > 0) {
@@ -266,16 +288,16 @@ export default function PerformanceChart({ assets, totalValue, isLoading, setPer
               };
             });
 
-            const chartCurrency = String(chart?.currency || asset?.currency || 'USD').toUpperCase();
+            const chartCurrency = String(chart?.currency || bucket.primaryAsset?.currency || 'USD').toUpperCase();
             const adjustedChart = {
               ...chart,
               currency: chartCurrency,
               series: adjustedSeries,
             };
-            timelineCacheRef.current.set(cacheKey, adjustedChart);
-            return { asset, symbol, chart: adjustedChart, quantity };
+            timelineCacheRef.current.set(bucket.cacheKey, adjustedChart);
+            return { bucket, chart: adjustedChart };
           } catch (error) {
-            return { asset, symbol, error };
+            return { bucket, error };
           }
         }),
       );
@@ -284,29 +306,37 @@ export default function PerformanceChart({ assets, totalValue, isLoading, setPer
         return;
       }
 
-      const combined = new Map();
-      cachedEntries.forEach((entry) => {
-        combined.set(entry.symbol, { asset: entry.asset, chart: entry.chart });
-      });
-
+      const resultMap = new Map();
       const failures = [];
 
       results.forEach((result) => {
         if (result.chart) {
-          combined.set(result.symbol, { asset: result.asset, chart: result.chart });
+          resultMap.set(result.bucket.symbol, result.chart);
         } else if (result.error) {
           failures.push({
-            symbol: result.symbol,
+            symbol: result.bucket.symbol,
             message: result.error?.message || 'Failed to load timeline.',
           });
         }
       });
 
-      const ordered = normalizedAssets
-        .map((entry) => combined.get(entry.symbol) || null)
+      const finalSources = buckets
+        .map((bucket) => {
+          const chart = resultMap.get(bucket.symbol) || cachedCharts.get(bucket.symbol);
+          if (!chart) {
+            return null;
+          }
+          return {
+            symbol: bucket.symbol,
+            chart,
+            totalQuantity: bucket.totalQuantity,
+            primaryAsset: bucket.primaryAsset,
+            assets: bucket.assets,
+          };
+        })
         .filter(Boolean);
 
-      setTimelineSources(ordered);
+      setTimelineSources(finalSources);
       setTimelineError(failures.length > 0 ? failures : null);
       setTimelineLoading(false);
     };
@@ -324,12 +354,12 @@ export default function PerformanceChart({ assets, totalValue, isLoading, setPer
     }
 
     const assetSeries = timelineSources
-      .map(({ asset, chart }) => {
-        const quantity = Number(asset?.quantity) || 0;
+      .map(({ chart, totalQuantity, primaryAsset }) => {
+        const quantity = Number(totalQuantity) || 0;
         if (!Number.isFinite(quantity) || quantity <= 0) {
           return null;
         }
-        const assetCurrency = String(chart?.currency || asset?.currency || "USD").toUpperCase();
+        const assetCurrency = String(chart?.currency || primaryAsset?.currency || "USD").toUpperCase();
         const rawSeries = Array.isArray(chart?.series) ? chart.series : [];
         if (!Array.isArray(rawSeries) || rawSeries.length === 0) {
           return null;
