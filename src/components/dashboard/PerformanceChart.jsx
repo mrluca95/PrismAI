@@ -74,6 +74,7 @@ const timelineOptions = ["1D", "1W", "1M", "3M", "YTD", "1Y", "5Y", "All"];
 const DAY_MS = 24 * 60 * 60 * 1000;
 const FREE_DATA_REFRESH_MS = 6 * 60 * 60 * 1000;
 const YAHOO_CHART_ENDPOINT = "https://query1.finance.yahoo.com/v8/finance/chart";
+const YAHOO_CHART_PROXY_ENDPOINT = "https://r.jina.ai/https://query1.finance.yahoo.com/v8/finance/chart";
 const YAHOO_QUERY =
   "range=max&interval=1d&includePrePost=false&lang=en-US&region=US&corsDomain=finance.yahoo.com";
 
@@ -184,17 +185,45 @@ const parseYahooSnapshot = (result) => {
   };
 };
 
+const extractJsonPayload = (text) => {
+  if (!text) {
+    throw new Error("Chart payload is empty.");
+  }
+  const braceIndex = text.indexOf("{");
+  if (braceIndex === -1) {
+    throw new Error("Could not locate JSON chart payload.");
+  }
+  const jsonCandidate = text.slice(braceIndex);
+  try {
+    return JSON.parse(jsonCandidate);
+  } catch (parseError) {
+    throw new Error("Failed to parse chart JSON.");
+  }
+};
+
 const fetchYahooSnapshot = async (symbol) => {
   const trimmed = String(symbol || "").trim().toUpperCase();
   if (!trimmed) {
     throw new Error("Invalid symbol");
   }
-  const url = `${YAHOO_CHART_ENDPOINT}/${encodeURIComponent(trimmed)}?${YAHOO_QUERY}`;
-  const response = await fetch(url, { method: "GET", mode: "cors" });
+  const isBrowser = typeof window !== "undefined";
+  const baseUrl = isBrowser ? YAHOO_CHART_PROXY_ENDPOINT : YAHOO_CHART_ENDPOINT;
+  const url = `${baseUrl}/${encodeURIComponent(trimmed)}?${YAHOO_QUERY}`;
+  const response = await fetch(url, {
+    method: "GET",
+    cache: "no-store",
+    mode: isBrowser ? "cors" : undefined,
+  });
   if (!response.ok) {
     throw new Error(`Yahoo Finance returned ${response.status}`);
   }
-  const data = await response.json();
+  let data;
+  if (isBrowser) {
+    const payloadText = await response.text();
+    data = extractJsonPayload(payloadText);
+  } else {
+    data = await response.json();
+  }
   const result = data?.chart?.result?.[0];
   if (!result) {
     const err = data?.chart?.error?.description || "Chart data unavailable.";
