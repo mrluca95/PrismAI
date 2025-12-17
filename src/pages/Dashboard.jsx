@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef, useCallback } from "react";
-import { Asset, AIInsight } from "@/entities/all";
+import { Asset, AIInsight, Transaction } from "@/entities/all";
 import { useNavigate } from 'react-router-dom';
 import { useAuth } from '@/context/AuthContext.jsx';
 import BalanceCard from "../components/dashboard/BalanceCard";
@@ -19,6 +19,7 @@ import { createPageUrl } from "@/utils";
 
 export default function Dashboard({ setPerformanceSign = () => {} }) {
   const [assets, setAssets] = useState([]);
+  const [transactions, setTransactions] = useState([]);
   const [insights, setInsights] = useState([]);
   const [isLoading, setIsLoading] = useState(true);
   const [isTxFormOpen, setIsTxFormOpen] = useState(false);
@@ -105,12 +106,14 @@ export default function Dashboard({ setPerformanceSign = () => {} }) {
   }, []);
 
   const loadData = useCallback(async () => {
-    const [assetsData, insightsData] = await Promise.all([
+    const [assetsData, insightsData, transactionsData] = await Promise.all([
       Asset.list(),
-      AIInsight.list("-created_date", 5)
+      AIInsight.list("-created_date", 5),
+      Transaction.list(),
     ]);
     setAssets(assetsData);
     setInsights(insightsData);
+    setTransactions(transactionsData);
     setLastUpdated(new Date());
   }, []);
 
@@ -347,6 +350,7 @@ export default function Dashboard({ setPerformanceSign = () => {} }) {
       {/* Performance Chart */}
       <PerformanceChart
         assets={assets}
+        transactions={transactions}
         totalValue={totalValue}
         isLoading={isLoading}
         setPerformanceSign={setPerformanceSign}

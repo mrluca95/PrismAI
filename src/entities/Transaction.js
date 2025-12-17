@@ -1,4 +1,4 @@
-import { readCollection, writeCollection, generateId, nowIso } from './storage';
+import { readCollection, writeCollection, generateId, nowIso } from './storage.js';
 
 const STORAGE_KEY = 'transactions';
 
