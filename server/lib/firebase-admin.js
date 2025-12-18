@@ -60,6 +60,17 @@ const loadServiceAccount = () => {
   return null;
 };
 
+const resolveProjectId = (serviceAccount) => {
+  return (
+    serviceAccount?.project_id
+    || serviceAccount?.projectId
+    || process.env.FIREBASE_PROJECT_ID
+    || process.env.GOOGLE_CLOUD_PROJECT
+    || process.env.GCLOUD_PROJECT
+    || null
+  );
+};
+
 const initFirebaseApp = () => {
   if (admin.apps.length > 0) {
     return admin.app();
@@ -67,12 +78,19 @@ const initFirebaseApp = () => {
 
   const serviceAccount = loadServiceAccount();
   const options = {};
+  const projectId = resolveProjectId(serviceAccount);
 
   if (serviceAccount) {
     options.credential = admin.credential.cert(serviceAccount);
   } else {
     console.warn('[firebase] Service account credentials not provided; attempting application default credentials.');
     options.credential = admin.credential.applicationDefault();
+  }
+
+  if (projectId) {
+    options.projectId = projectId;
+  } else {
+    console.error('[firebase] Project ID is not configured. Set FIREBASE_PROJECT_ID or include project_id in your service account JSON.');
   }
 
   if (process.env.FIREBASE_DATABASE_URL) {
